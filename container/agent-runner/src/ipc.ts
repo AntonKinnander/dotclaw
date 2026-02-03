@@ -10,6 +10,10 @@ import { CronExpressionParser } from 'cron-parser';
 const IPC_DIR = '/workspace/ipc';
 const MESSAGES_DIR = path.join(IPC_DIR, 'messages');
 const TASKS_DIR = path.join(IPC_DIR, 'tasks');
+const REQUESTS_DIR = path.join(IPC_DIR, 'requests');
+const RESPONSES_DIR = path.join(IPC_DIR, 'responses');
+const DEFAULT_REQUEST_TIMEOUT_MS = parseInt(process.env.DOTCLAW_IPC_REQUEST_TIMEOUT_MS || '6000', 10);
+const DEFAULT_REQUEST_POLL_MS = parseInt(process.env.DOTCLAW_IPC_REQUEST_POLL_MS || '150', 10);
 
 export interface IpcContext {
   chatJid: string;
@@ -28,6 +32,41 @@ function writeIpcFile(dir: string, data: object): string {
   fs.renameSync(tempPath, filepath);
 
   return filename;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function requestResponse(type: string, payload: Record<string, unknown>, timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS) {
+  fs.mkdirSync(REQUESTS_DIR, { recursive: true });
+  fs.mkdirSync(RESPONSES_DIR, { recursive: true });
+
+  const id = `req-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  writeIpcFile(REQUESTS_DIR, {
+    id,
+    type,
+    payload,
+    timestamp: new Date().toISOString()
+  });
+
+  const deadline = Date.now() + timeoutMs;
+  const responsePath = path.join(RESPONSES_DIR, `${id}.json`);
+
+  while (Date.now() < deadline) {
+    if (fs.existsSync(responsePath)) {
+      const responseRaw = fs.readFileSync(responsePath, 'utf-8');
+      fs.unlinkSync(responsePath);
+      try {
+        return JSON.parse(responseRaw);
+      } catch {
+        return { ok: false, error: 'Failed to parse IPC response' };
+      }
+    }
+    await sleep(DEFAULT_REQUEST_POLL_MS);
+  }
+
+  return { ok: false, error: `IPC request timeout (${timeoutMs}ms)` };
 }
 
 export function createIpcHandlers(ctx: IpcContext) {
@@ -158,18 +197,64 @@ export function createIpcHandlers(ctx: IpcContext) {
       return { ok: true };
     },
 
-    async setModel(args: { model: string }) {
+    async setModel(args: { model: string; scope?: 'global' | 'group' | 'user'; target_id?: string }) {
       if (!isMain) {
         return { ok: false, error: 'Only the main group can change the model.' };
       }
       writeIpcFile(TASKS_DIR, {
         type: 'set_model',
         model: args.model,
+        scope: args.scope,
+        target_id: args.target_id,
         groupFolder,
         chatJid,
         timestamp: new Date().toISOString()
       });
       return { ok: true };
+    },
+
+    async memoryUpsert(args: { items: unknown[]; source?: string; target_group?: string }) {
+      return requestResponse('memory_upsert', {
+        items: args.items,
+        source: args.source,
+        target_group: args.target_group
+      });
+    },
+
+    async memoryForget(args: { ids?: string[]; content?: string; scope?: string; userId?: string; target_group?: string }) {
+      return requestResponse('memory_forget', {
+        ids: args.ids,
+        content: args.content,
+        scope: args.scope,
+        userId: args.userId,
+        target_group: args.target_group
+      });
+    },
+
+    async memoryList(args: { scope?: string; type?: string; userId?: string; limit?: number; target_group?: string }) {
+      return requestResponse('memory_list', {
+        scope: args.scope,
+        type: args.type,
+        userId: args.userId,
+        limit: args.limit,
+        target_group: args.target_group
+      });
+    },
+
+    async memorySearch(args: { query: string; userId?: string; limit?: number; target_group?: string }) {
+      return requestResponse('memory_search', {
+        query: args.query,
+        userId: args.userId,
+        limit: args.limit,
+        target_group: args.target_group
+      });
+    },
+
+    async memoryStats(args: { userId?: string; target_group?: string }) {
+      return requestResponse('memory_stats', {
+        userId: args.userId,
+        target_group: args.target_group
+      });
     }
   };
 }

@@ -57,6 +57,33 @@ export function initDatabase(): void {
       FOREIGN KEY (task_id) REFERENCES scheduled_tasks(id)
     );
     CREATE INDEX IF NOT EXISTS idx_task_run_logs ON task_run_logs(task_id, run_at);
+
+    CREATE TABLE IF NOT EXISTS chat_state (
+      chat_jid TEXT PRIMARY KEY,
+      last_agent_timestamp TEXT,
+      last_agent_message_id TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS group_sessions (
+      group_folder TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS tool_audit (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      trace_id TEXT,
+      chat_jid TEXT,
+      group_folder TEXT,
+      tool_name TEXT NOT NULL,
+      ok INTEGER NOT NULL,
+      duration_ms INTEGER,
+      error TEXT,
+      created_at TEXT NOT NULL,
+      source TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_tool_audit_trace ON tool_audit(trace_id);
+    CREATE INDEX IF NOT EXISTS idx_tool_audit_group ON tool_audit(group_folder, created_at);
   `);
 
   // Add sender_name column if it doesn't exist (migration for existing DBs)
@@ -156,7 +183,7 @@ export function storeMessage(
     .run(msgId, chatId, senderId, senderName, content, timestamp, isFromMe ? 1 : 0);
 }
 
-export function getNewMessages(jids: string[], lastTimestamp: string, _botPrefix: string): { messages: NewMessage[]; newTimestamp: string } {
+export function getNewMessages(jids: string[], lastTimestamp: string): { messages: NewMessage[]; newTimestamp: string } {
   if (jids.length === 0) return { messages: [], newTimestamp: lastTimestamp };
 
   const placeholders = jids.map(() => '?').join(',');
@@ -181,7 +208,7 @@ export function getNewMessages(jids: string[], lastTimestamp: string, _botPrefix
   return { messages: rows, newTimestamp };
 }
 
-export function getMessagesSince(chatJid: string, sinceTimestamp: string, _botPrefix: string): NewMessage[] {
+export function getMessagesSince(chatJid: string, sinceTimestamp: string): NewMessage[] {
   // Filter by is_from_me - bot's messages are stored with is_from_me=1
   // We only want messages from users (is_from_me=0)
   const sql = `
@@ -193,6 +220,79 @@ export function getMessagesSince(chatJid: string, sinceTimestamp: string, _botPr
   const params = [chatJid, sinceTimestamp];
 
   return db.prepare(sql).all(...params) as NewMessage[];
+}
+
+export function getMessagesSinceCursor(
+  chatJid: string,
+  sinceTimestamp: string | null,
+  sinceMessageId: string | null
+): NewMessage[] {
+  const timestamp = sinceTimestamp || '1970-01-01T00:00:00.000Z';
+  const messageId = sinceMessageId || '0';
+  const sql = `
+    SELECT id, chat_jid, sender, sender_name, content, timestamp
+    FROM messages
+    WHERE chat_jid = ? AND is_from_me = 0 AND (
+      timestamp > ? OR (timestamp = ? AND CAST(id AS INTEGER) > CAST(? AS INTEGER))
+    )
+    ORDER BY timestamp, CAST(id AS INTEGER)
+  `;
+  return db.prepare(sql).all(chatJid, timestamp, timestamp, messageId) as NewMessage[];
+}
+
+export interface ChatState {
+  chat_jid: string;
+  last_agent_timestamp: string | null;
+  last_agent_message_id: string | null;
+}
+
+export function getChatState(chatJid: string): ChatState | null {
+  const row = db.prepare(`
+    SELECT chat_jid, last_agent_timestamp, last_agent_message_id
+    FROM chat_state
+    WHERE chat_jid = ?
+  `).get(chatJid) as ChatState | undefined;
+  return row || null;
+}
+
+export function updateChatState(chatJid: string, timestamp: string, messageId: string): void {
+  db.prepare(`
+    INSERT INTO chat_state (chat_jid, last_agent_timestamp, last_agent_message_id)
+    VALUES (?, ?, ?)
+    ON CONFLICT(chat_jid) DO UPDATE SET
+      last_agent_timestamp = excluded.last_agent_timestamp,
+      last_agent_message_id = excluded.last_agent_message_id
+  `).run(chatJid, timestamp, messageId);
+}
+
+export interface GroupSession {
+  group_folder: string;
+  session_id: string;
+  updated_at: string;
+}
+
+export function getAllGroupSessions(): GroupSession[] {
+  return db.prepare(`SELECT group_folder, session_id, updated_at FROM group_sessions`).all() as GroupSession[];
+}
+
+export function getGroupSession(groupFolder: string): GroupSession | null {
+  const row = db.prepare(`
+    SELECT group_folder, session_id, updated_at
+    FROM group_sessions
+    WHERE group_folder = ?
+  `).get(groupFolder) as GroupSession | undefined;
+  return row || null;
+}
+
+export function setGroupSession(groupFolder: string, sessionId: string): void {
+  const now = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO group_sessions (group_folder, session_id, updated_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT(group_folder) DO UPDATE SET
+      session_id = excluded.session_id,
+      updated_at = excluded.updated_at
+  `).run(groupFolder, sessionId, now);
 }
 
 export function createTask(task: Omit<ScheduledTask, 'last_run' | 'last_result'>): void {
@@ -280,4 +380,35 @@ export function getTaskRunLogs(taskId: string, limit = 10): TaskRunLog[] {
     ORDER BY run_at DESC
     LIMIT ?
   `).all(taskId, limit) as TaskRunLog[];
+}
+
+export function logToolCalls(params: {
+  traceId: string;
+  chatJid: string;
+  groupFolder: string;
+  toolCalls: Array<{ name: string; ok: boolean; duration_ms?: number; error?: string }>;
+  source: string;
+}): void {
+  if (!params.toolCalls || params.toolCalls.length === 0) return;
+  const now = new Date().toISOString();
+  const stmt = db.prepare(`
+    INSERT INTO tool_audit (trace_id, chat_jid, group_folder, tool_name, ok, duration_ms, error, created_at, source)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  const transaction = db.transaction((calls: typeof params.toolCalls) => {
+    for (const call of calls) {
+      stmt.run(
+        params.traceId,
+        params.chatJid,
+        params.groupFolder,
+        call.name,
+        call.ok ? 1 : 0,
+        call.duration_ms ?? null,
+        call.error ?? null,
+        now,
+        params.source
+      );
+    }
+  });
+  transaction(params.toolCalls);
 }

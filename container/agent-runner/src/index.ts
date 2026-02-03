@@ -5,8 +5,10 @@
 
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import { OpenRouter, stepCountIs } from '@openrouter/sdk';
-import { createTools, ToolCallRecord } from './tools.js';
+import { createTools, ToolCallRecord, ToolPolicy } from './tools.js';
+import { createIpcHandlers } from './ipc.js';
 import {
   createSessionContext,
   appendHistory,
@@ -32,6 +34,22 @@ interface ContainerInput {
   chatJid: string;
   isMain: boolean;
   isScheduledTask?: boolean;
+  userId?: string;
+  userName?: string;
+  memoryRecall?: string[];
+  userProfile?: string | null;
+  memoryStats?: {
+    total: number;
+    user: number;
+    group: number;
+    global: number;
+  };
+  behaviorConfig?: Record<string, unknown>;
+  toolPolicy?: ToolPolicy;
+  modelOverride?: string;
+  modelContextTokens?: number;
+  modelMaxOutputTokens?: number;
+  modelTemperature?: number;
 }
 
 interface ContainerOutput {
@@ -60,6 +78,24 @@ const PROMPT_PACKS_ENABLED = !['0', 'false', 'no', 'off'].includes((process.env.
 const PROMPT_PACKS_MAX_CHARS = parseInt(process.env.DOTCLAW_PROMPT_PACKS_MAX_CHARS || '6000', 10);
 const PROMPT_PACKS_MAX_DEMOS = parseInt(process.env.DOTCLAW_PROMPT_PACKS_MAX_DEMOS || '4', 10);
 const PROMPT_PACKS_CANARY_RATE = parseFloat(process.env.DOTCLAW_PROMPT_PACKS_CANARY_RATE || '0.1');
+
+let cachedOpenRouter: OpenRouter | null = null;
+let cachedOpenRouterKey = '';
+let cachedOpenRouterOptions = '';
+
+function getCachedOpenRouter(apiKey: string, options: ReturnType<typeof getOpenRouterOptions>): OpenRouter {
+  const optionsKey = JSON.stringify(options);
+  if (cachedOpenRouter && cachedOpenRouterKey === apiKey && cachedOpenRouterOptions === optionsKey) {
+    return cachedOpenRouter;
+  }
+  cachedOpenRouter = new OpenRouter({
+    apiKey,
+    ...options
+  });
+  cachedOpenRouterKey = apiKey;
+  cachedOpenRouterOptions = optionsKey;
+  return cachedOpenRouter;
+}
 
 function log(message: string): void {
   console.error(`[agent-runner] ${message}`);
@@ -218,7 +254,11 @@ function buildSystemInstructions(params: {
   assistantName: string;
   memorySummary: string;
   memoryFacts: string[];
-  memoryRecall: string[];
+  sessionRecall: string[];
+  longTermRecall: string[];
+  userProfile?: string | null;
+  memoryStats?: { total: number; user: number; group: number; global: number };
+  behaviorConfig?: Record<string, unknown>;
   isScheduledTask: boolean;
   taskExtractionPack?: PromptPack | null;
   responseQualityPack?: PromptPack | null;
@@ -235,16 +275,59 @@ function buildSystemInstructions(params: {
     '- `mcp__dotclaw__schedule_task`: schedule tasks.',
     '- `mcp__dotclaw__list_tasks`, `mcp__dotclaw__pause_task`, `mcp__dotclaw__resume_task`, `mcp__dotclaw__cancel_task`.',
     '- `mcp__dotclaw__register_group`: main group only.',
-    '- `mcp__dotclaw__set_model`: main group only.'
+    '- `mcp__dotclaw__set_model`: main group only.',
+    '- `mcp__dotclaw__memory_upsert`: store durable memories.',
+    '- `mcp__dotclaw__memory_search`, `mcp__dotclaw__memory_list`, `mcp__dotclaw__memory_forget`, `mcp__dotclaw__memory_stats`.',
+    '- `plugin__*`: dynamically loaded plugin tools (if present and allowed by policy).'
   ].join('\n');
 
   const memorySummary = params.memorySummary ? params.memorySummary : 'None yet.';
   const memoryFacts = params.memoryFacts.length > 0
     ? params.memoryFacts.map(fact => `- ${fact}`).join('\n')
     : 'None yet.';
-  const memoryRecall = params.memoryRecall.length > 0
-    ? params.memoryRecall.map(item => `- ${item}`).join('\n')
+  const sessionRecall = params.sessionRecall.length > 0
+    ? params.sessionRecall.map(item => `- ${item}`).join('\n')
     : 'None.';
+
+  const longTermRecall = params.longTermRecall.length > 0
+    ? params.longTermRecall.map(item => `- ${item}`).join('\n')
+    : 'None.';
+
+  const userProfile = params.userProfile
+    ? params.userProfile
+    : 'None.';
+
+  const memoryStats = params.memoryStats
+    ? `Total: ${params.memoryStats.total}, User: ${params.memoryStats.user}, Group: ${params.memoryStats.group}, Global: ${params.memoryStats.global}`
+    : 'Unknown.';
+
+  const behaviorNotes: string[] = [];
+  const responseStyle = typeof params.behaviorConfig?.response_style === 'string'
+    ? String(params.behaviorConfig.response_style)
+    : '';
+  if (responseStyle === 'concise') {
+    behaviorNotes.push('Response style: concise and action-oriented.');
+  } else if (responseStyle === 'detailed') {
+    behaviorNotes.push('Response style: detailed and step-by-step where helpful.');
+  }
+  const toolBias = typeof params.behaviorConfig?.tool_calling_bias === 'number'
+    ? Number(params.behaviorConfig.tool_calling_bias)
+    : null;
+  if (toolBias !== null && toolBias < 0.4) {
+    behaviorNotes.push('Tool usage: be conservative, ask clarifying questions before calling tools.');
+  } else if (toolBias !== null && toolBias > 0.6) {
+    behaviorNotes.push('Tool usage: be proactive when tools add accuracy or save time.');
+  }
+  const cautionBias = typeof params.behaviorConfig?.caution_bias === 'number'
+    ? Number(params.behaviorConfig.caution_bias)
+    : null;
+  if (cautionBias !== null && cautionBias > 0.6) {
+    behaviorNotes.push('Caution: verify uncertain facts and flag limitations.');
+  }
+
+  const behaviorConfig = params.behaviorConfig
+    ? `Behavior overrides:\n${JSON.stringify(params.behaviorConfig, null, 2)}`
+    : '';
 
   const scheduledNote = params.isScheduledTask
     ? 'You are running as a scheduled task. If you need to communicate, use `mcp__dotclaw__send_message`.'
@@ -294,8 +377,16 @@ function buildSystemInstructions(params: {
     memorySummary,
     'Long-term facts:',
     memoryFacts,
-    'Relevant recalled context:',
-    memoryRecall,
+    'User profile (if available):',
+    userProfile,
+    'Long-term memory recall (durable facts/preferences):',
+    longTermRecall,
+    'Session recall (recent/older conversation snippets):',
+    sessionRecall,
+    'Memory stats:',
+    memoryStats,
+    behaviorNotes.length > 0 ? `Behavior notes:\n${behaviorNotes.join('\n')}` : '',
+    behaviorConfig,
     'Respond succinctly and helpfully. If you perform tool actions, summarize the results.'
   ].filter(Boolean).join('\n\n');
 }
@@ -346,46 +437,114 @@ async function updateMemorySummary(params: {
   return parseSummaryResponse(text);
 }
 
-async function main(): Promise<void> {
-  let input: ContainerInput;
+function buildMemoryExtractionPrompt(params: {
+  assistantName: string;
+  userId?: string;
+  userName?: string;
+  messages: Message[];
+  memoryPolicyPack?: PromptPack | null;
+}): { instructions: string; input: string } {
+  const policyBlock = params.memoryPolicyPack
+    ? formatMemoryPolicyPack({
+      pack: params.memoryPolicyPack,
+      maxDemos: PROMPT_PACKS_MAX_DEMOS,
+      maxChars: PROMPT_PACKS_MAX_CHARS
+    })
+    : '';
 
-  try {
-    const stdinData = await readStdin();
-    input = JSON.parse(stdinData);
-    log(`Received input for group: ${input.groupFolder}`);
-  } catch (err) {
-    writeOutput({
-      status: 'error',
-      result: null,
-      error: `Failed to parse input: ${err instanceof Error ? err.message : String(err)}`
-    });
-    process.exit(1);
+  const instructions = [
+    `You are ${params.assistantName}'s long-term memory extractor.`,
+    'Extract durable, user-approved memories only.',
+    'Prefer stable facts, preferences, identity details, projects, and long-running tasks.',
+    'Avoid transient details, ephemeral scheduling, or speculative statements.',
+    'If the user explicitly asked to remember something, include it.',
+    'Return JSON only with key "items": array of memory objects.',
+    'Each item fields:',
+    '- scope: "user" | "group" | "global"',
+    '- subject_id: user id for user scope (optional for group/global)',
+    '- type: "identity" | "preference" | "fact" | "relationship" | "project" | "task" | "note"',
+    '- content: the memory string',
+    '- importance: 0-1 (higher = more important)',
+    '- confidence: 0-1',
+    '- tags: array of short tags',
+    '- ttl_days: optional number (omit for permanent memories).',
+    policyBlock
+  ].filter(Boolean).join('\n');
+
+  const transcript = params.messages
+    .map(msg => `${msg.role.toUpperCase()}: ${msg.content}`)
+    .join('\n\n');
+
+  const input = [
+    `User: ${params.userName || 'Unknown'} (${params.userId || 'unknown'})`,
+    'Transcript:',
+    transcript
+  ].join('\n\n');
+
+  return { instructions, input };
+}
+
+function parseMemoryExtraction(text: string): Array<Record<string, unknown>> {
+  const trimmed = text.trim();
+  let jsonText = trimmed;
+  const fenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenceMatch) {
+    jsonText = fenceMatch[1].trim();
   }
+  try {
+    const parsed = JSON.parse(jsonText);
+    const items = Array.isArray(parsed?.items) ? parsed.items : [];
+    return items.filter((item: unknown) => !!item && typeof item === 'object');
+  } catch {
+    return [];
+  }
+}
+
+export async function runAgentOnce(input: ContainerInput): Promise<ContainerOutput> {
+  log(`Received input for group: ${input.groupFolder}`);
 
   const apiKey = process.env.OPENROUTER_API_KEY;
   if (!apiKey) {
-    writeOutput({
+    return {
       status: 'error',
       result: null,
       error: 'OPENROUTER_API_KEY is not set'
-    });
-    process.exit(1);
+    };
   }
 
-  const model = process.env.OPENROUTER_MODEL || 'moonshotai/kimi-k2.5';
+  const model = input.modelOverride || process.env.OPENROUTER_MODEL || 'moonshotai/kimi-k2.5';
   const summaryModel = process.env.DOTCLAW_SUMMARY_MODEL || model;
+  const memoryModel = process.env.DOTCLAW_MEMORY_MODEL || summaryModel;
   const assistantName = process.env.ASSISTANT_NAME || 'Rain';
   const config = getConfig();
+  if (input.modelContextTokens && Number.isFinite(input.modelContextTokens)) {
+    config.maxContextTokens = Math.min(config.maxContextTokens, input.modelContextTokens);
+    const compactionTarget = input.modelContextTokens - config.maxOutputTokens;
+    config.compactionTriggerTokens = Math.max(1000, Math.min(config.compactionTriggerTokens, compactionTarget));
+  }
+  if (input.modelMaxOutputTokens && Number.isFinite(input.modelMaxOutputTokens)) {
+    config.maxOutputTokens = Math.min(config.maxOutputTokens, input.modelMaxOutputTokens);
+  }
+  if (input.modelTemperature && Number.isFinite(input.modelTemperature)) {
+    config.temperature = input.modelTemperature;
+  }
   const openrouterOptions = getOpenRouterOptions();
   const maxToolSteps = parsePositiveInt(process.env.DOTCLAW_MAX_TOOL_STEPS, 12);
+  const memoryExtractionEnabled = isEnabledEnv('DOTCLAW_MEMORY_EXTRACTION_ENABLED', true);
+  const memoryExtractionMaxMessages = parsePositiveInt(process.env.DOTCLAW_MEMORY_EXTRACTION_MESSAGES, 8);
+  const memoryExtractionMaxOutputTokens = parsePositiveInt(process.env.DOTCLAW_MEMORY_EXTRACTION_MAX_OUTPUT_TOKENS, 900);
+  const memoryExtractScheduled = isEnabledEnv('DOTCLAW_MEMORY_EXTRACT_SCHEDULED', false);
+  const memoryArchiveSync = isEnabledEnv('DOTCLAW_MEMORY_ARCHIVE_SYNC', true);
 
-  const openrouter = new OpenRouter({
-    apiKey,
-    ...openrouterOptions
-  });
+  const openrouter = getCachedOpenRouter(apiKey, openrouterOptions);
 
   const { ctx: sessionCtx, isNew } = createSessionContext(SESSION_ROOT, input.sessionId);
   const toolCalls: ToolCallRecord[] = [];
+  const ipc = createIpcHandlers({
+    chatJid: input.chatJid,
+    groupFolder: input.groupFolder,
+    isMain: input.isMain
+  });
   const tools = createTools({
     chatJid: input.chatJid,
     groupFolder: input.groupFolder,
@@ -393,28 +552,27 @@ async function main(): Promise<void> {
   }, {
     onToolCall: (call) => {
       toolCalls.push(call);
-    }
+    },
+    policy: input.toolPolicy
   });
 
   if (process.env.DOTCLAW_SELF_CHECK === '1') {
     try {
       const details = await runSelfCheck({ model });
-      writeOutput({
+      return {
         status: 'success',
         result: `Self-check passed: ${details.join(', ')}`,
         newSessionId: isNew ? sessionCtx.sessionId : undefined
-      });
-      return;
+      };
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
       log(`Self-check failed: ${errorMessage}`);
-      writeOutput({
+      return {
         status: 'error',
         result: null,
         newSessionId: isNew ? sessionCtx.sessionId : undefined,
         error: errorMessage
-      });
-      process.exit(1);
+      };
     }
   }
 
@@ -449,6 +607,38 @@ async function main(): Promise<void> {
         ? olderMessages[olderMessages.length - 1].seq
         : sessionCtx.state.lastSummarySeq;
       saveMemoryState(sessionCtx);
+
+      if (memoryArchiveSync) {
+        try {
+          const archiveItems: Array<Record<string, unknown>> = [];
+          if (summaryUpdate.summary) {
+            archiveItems.push({
+              scope: 'group',
+              type: 'archive',
+              content: `Conversation summary: ${summaryUpdate.summary}`,
+              importance: 0.6,
+              confidence: 0.7,
+              tags: ['summary', 'archive']
+            });
+          }
+          for (const fact of summaryUpdate.facts || []) {
+            if (!fact || typeof fact !== 'string') continue;
+            archiveItems.push({
+              scope: 'group',
+              type: 'fact',
+              content: fact,
+              importance: 0.7,
+              confidence: 0.7,
+              tags: ['fact', 'archive']
+            });
+          }
+          if (archiveItems.length > 0) {
+            await ipc.memoryUpsert({ items: archiveItems, source: 'compaction' });
+          }
+        } catch (err) {
+          log(`Memory archive sync failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
     }
 
     writeHistory(sessionCtx, recentMessages);
@@ -459,7 +649,7 @@ async function main(): Promise<void> {
   ({ recentMessages, olderMessages } = splitRecentHistory(history, config.recentContextTokens));
 
   const query = extractQueryFromPrompt(prompt);
-  const memoryRecall = retrieveRelevantMemories({
+  const sessionRecall = retrieveRelevantMemories({
     query,
     summary: sessionCtx.state.summary,
     facts: sessionCtx.state.facts,
@@ -501,7 +691,11 @@ async function main(): Promise<void> {
     assistantName,
     memorySummary: sessionCtx.state.summary,
     memoryFacts: sessionCtx.state.facts,
-    memoryRecall,
+    sessionRecall,
+    longTermRecall: input.memoryRecall || [],
+    userProfile: input.userProfile ?? null,
+    memoryStats: input.memoryStats,
+    behaviorConfig: input.behaviorConfig,
     isScheduledTask: !!input.isScheduledTask,
     taskExtractionPack: taskPackResult?.pack || null,
     responseQualityPack: responseQualityResult?.pack || null,
@@ -545,7 +739,7 @@ async function main(): Promise<void> {
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);
     log(`Agent error: ${errorMessage}`);
-    writeOutput({
+    return {
       status: 'error',
       result: null,
       newSessionId: isNew ? sessionCtx.sessionId : undefined,
@@ -556,8 +750,7 @@ async function main(): Promise<void> {
       memory_facts: sessionCtx.state.facts,
       tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
       latency_ms: latencyMs
-    });
-    process.exit(1);
+    };
   }
 
   appendHistory(sessionCtx, 'assistant', responseText || '');
@@ -581,10 +774,62 @@ async function main(): Promise<void> {
     }
   }
 
+  if (memoryExtractionEnabled && (!input.isScheduledTask || memoryExtractScheduled)) {
+    try {
+      const extractionMessages = history.slice(-memoryExtractionMaxMessages);
+      if (extractionMessages.length > 0) {
+        const extractionPrompt = buildMemoryExtractionPrompt({
+          assistantName,
+          userId: input.userId,
+          userName: input.userName,
+          messages: extractionMessages,
+          memoryPolicyPack: memoryPolicyResult?.pack || null
+        });
+        const extractionResult = await openrouter.callModel({
+          model: memoryModel,
+          instructions: extractionPrompt.instructions,
+          input: extractionPrompt.input,
+          maxOutputTokens: memoryExtractionMaxOutputTokens,
+          temperature: 0.1
+        });
+        const extractionText = await extractionResult.getText();
+        const extractedItems = parseMemoryExtraction(extractionText);
+        if (extractedItems.length > 0) {
+          const behaviorThreshold = typeof input.behaviorConfig?.memory_importance_threshold === 'number'
+            ? Number(input.behaviorConfig?.memory_importance_threshold)
+            : null;
+          const normalizedItems = extractedItems
+            .filter((item) => {
+              if (behaviorThreshold === null) return true;
+              const importance = typeof item.importance === 'number' ? item.importance : null;
+              if (importance === null) return true;
+              return importance >= behaviorThreshold;
+            })
+            .map((item) => {
+            const scope = typeof item.scope === 'string' ? item.scope : '';
+            const subject = item.subject_id;
+            if (scope === 'user' && !subject && input.userId) {
+              return { ...item, subject_id: input.userId };
+            }
+            return item;
+          });
+          if (normalizedItems.length > 0) {
+            await ipc.memoryUpsert({
+              items: normalizedItems as unknown[],
+              source: 'agent-extraction'
+            });
+          }
+        }
+      }
+    } catch (err) {
+      log(`Memory extraction failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   // Normalize empty/whitespace-only responses to null
   const finalResult = responseText && responseText.trim() ? responseText : null;
 
-  writeOutput({
+  return {
     status: 'success',
     result: finalResult,
     newSessionId: isNew ? sessionCtx.sessionId : undefined,
@@ -594,15 +839,33 @@ async function main(): Promise<void> {
     memory_facts: sessionCtx.state.facts,
     tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
     latency_ms: latencyMs
-  });
+  };
 }
 
-main().catch(err => {
-  log(`Fatal error: ${err instanceof Error ? err.message : String(err)}`);
-  writeOutput({
-    status: 'error',
-    result: null,
-    error: err instanceof Error ? err.message : String(err)
+async function main(): Promise<void> {
+  try {
+    const stdinData = await readStdin();
+    const input = JSON.parse(stdinData) as ContainerInput;
+    const output = await runAgentOnce(input);
+    writeOutput(output);
+  } catch (err) {
+    writeOutput({
+      status: 'error',
+      result: null,
+      error: err instanceof Error ? err.message : String(err)
+    });
+  }
+}
+
+const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
+if (isMain) {
+  main().catch(err => {
+    log(`Fatal error: ${err instanceof Error ? err.message : String(err)}`);
+    writeOutput({
+      status: 'error',
+      result: null,
+      error: err instanceof Error ? err.message : String(err)
+    });
+    process.exit(1);
   });
-  process.exit(1);
-});
+}

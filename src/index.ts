@@ -6,9 +6,7 @@ import fs from 'fs';
 import path from 'path';
 
 import {
-  ASSISTANT_NAME,
   DATA_DIR,
-  MODEL_CONFIG_PATH,
   MAIN_GROUP_FOLDER,
   GROUPS_DIR,
   IPC_POLL_INTERVAL,
@@ -16,13 +14,47 @@ import {
   TIMEZONE
 } from './config.js';
 import { RegisteredGroup, Session } from './types.js';
-import { initDatabase, storeMessage, storeChatMetadata, getMessagesSince, getAllTasks, createTask, updateTask, deleteTask, getTaskById } from './db.js';
+import {
+  initDatabase,
+  storeMessage,
+  storeChatMetadata,
+  getMessagesSinceCursor,
+  getChatState,
+  updateChatState,
+  getAllTasks,
+  createTask,
+  updateTask,
+  deleteTask,
+  getTaskById,
+  getAllGroupSessions,
+  setGroupSession,
+  logToolCalls
+} from './db.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { runContainerAgent, writeTasksSnapshot, writeGroupsSnapshot } from './container-runner.js';
 import type { ContainerOutput } from './container-runner.js';
-import { loadJson, saveJson, isSafeGroupFolder, loadModelConfig, saveModelConfig, isModelAllowed } from './utils.js';
+import { loadJson, saveJson, isSafeGroupFolder } from './utils.js';
 import { writeTrace } from './trace-writer.js';
 import { formatTelegramMessage, TELEGRAM_PARSE_MODE } from './telegram-format.js';
+import { withGroupLock } from './locks.js';
+import {
+  initMemoryStore,
+  buildMemoryRecall,
+  buildUserProfile,
+  getMemoryStats,
+  upsertMemoryItems,
+  searchMemories,
+  listMemories,
+  forgetMemories,
+  cleanupExpiredMemories,
+  MemoryScope,
+  MemoryType,
+  MemoryItemInput
+} from './memory-store.js';
+import { loadBehaviorConfig } from './behavior-config.js';
+import { getEffectiveToolPolicy } from './tool-policy.js';
+import { resolveModel, loadModelRegistry, saveModelRegistry } from './model-registry.js';
+import { startMetricsServer, recordMessage, recordError, recordToolCall, recordLatency } from './metrics.js';
 
 const logger = pino({
   level: process.env.LOG_LEVEL || 'info',
@@ -35,12 +67,63 @@ function parsePositiveInt(value: string | undefined, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function isMemoryScope(value: unknown): value is MemoryScope {
+  return value === 'user' || value === 'group' || value === 'global';
+}
+
+function isMemoryType(value: unknown): value is MemoryType {
+  return value === 'identity'
+    || value === 'preference'
+    || value === 'fact'
+    || value === 'relationship'
+    || value === 'project'
+    || value === 'task'
+    || value === 'note'
+    || value === 'archive';
+}
+
+function coerceMemoryItems(input: unknown): MemoryItemInput[] {
+  if (!Array.isArray(input)) return [];
+  const items: MemoryItemInput[] = [];
+
+  for (const raw of input) {
+    if (!isRecord(raw)) continue;
+    const scope = raw.scope;
+    const type = raw.type;
+    const content = raw.content;
+    if (!isMemoryScope(scope) || !isMemoryType(type) || typeof content !== 'string' || !content.trim()) {
+      continue;
+    }
+
+    items.push({
+      scope,
+      type,
+      content: content.trim(),
+      subject_id: typeof raw.subject_id === 'string' ? raw.subject_id : null,
+      importance: typeof raw.importance === 'number' ? raw.importance : undefined,
+      confidence: typeof raw.confidence === 'number' ? raw.confidence : undefined,
+      tags: Array.isArray(raw.tags) ? raw.tags.filter((tag): tag is string => typeof tag === 'string') : undefined,
+      ttl_days: typeof raw.ttl_days === 'number' ? raw.ttl_days : undefined,
+      source: typeof raw.source === 'string' ? raw.source : undefined,
+      metadata: isRecord(raw.metadata) ? raw.metadata : undefined
+    });
+  }
+
+  return items;
+}
+
 const TELEGRAM_HANDLER_TIMEOUT_MS = parsePositiveInt(
   process.env.DOTCLAW_TELEGRAM_HANDLER_TIMEOUT_MS,
   Math.max(CONTAINER_TIMEOUT + 30_000, 120_000)
 );
 const TELEGRAM_SEND_RETRIES = parsePositiveInt(process.env.DOTCLAW_TELEGRAM_SEND_RETRIES, 3);
 const TELEGRAM_SEND_RETRY_DELAY_MS = parsePositiveInt(process.env.DOTCLAW_TELEGRAM_SEND_RETRY_DELAY_MS, 1000);
+const MEMORY_RECALL_MAX_RESULTS = parsePositiveInt(process.env.DOTCLAW_MEMORY_RECALL_MAX_RESULTS, 8);
+const MEMORY_RECALL_MAX_TOKENS = parsePositiveInt(process.env.DOTCLAW_MEMORY_RECALL_MAX_TOKENS, 1200);
 
 // Initialize Telegram bot with extended timeout for long-running agent tasks
 const telegrafBot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN!, {
@@ -52,7 +135,6 @@ telegrafBot.catch((err, ctx) => {
 
 let sessions: Session = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
-let lastAgentTimestamp: Record<string, string> = {};
 
 const TELEGRAM_MAX_MESSAGE_LENGTH = 4000;
 const TELEGRAM_SEND_DELAY_MS = 250;
@@ -130,10 +212,7 @@ function isRetryableTelegramError(err: unknown): boolean {
 }
 
 function loadState(): void {
-  const statePath = path.join(DATA_DIR, 'router_state.json');
-  const state = loadJson<{ last_agent_timestamp?: Record<string, string> }>(statePath, {});
-  lastAgentTimestamp = state.last_agent_timestamp || {};
-  sessions = loadJson(path.join(DATA_DIR, 'sessions.json'), {});
+  sessions = {};
   const loadedGroups = loadJson(path.join(DATA_DIR, 'registered_groups.json'), {});
   const sanitizedGroups: Record<string, RegisteredGroup> = {};
   const usedFolders = new Set<string>();
@@ -170,10 +249,25 @@ function loadState(): void {
     logger.error({ invalidCount, duplicateCount }, 'Registered groups contained invalid or duplicate folders');
   }
   logger.info({ groupCount: Object.keys(registeredGroups).length }, 'State loaded');
+
+  // Load sessions from DB; migrate legacy sessions.json if DB is empty
+  const dbSessions = getAllGroupSessions();
+  if (dbSessions.length === 0) {
+    const legacySessions = loadJson(path.join(DATA_DIR, 'sessions.json'), {});
+    for (const [folder, sessionId] of Object.entries(legacySessions)) {
+      if (typeof sessionId === 'string' && sessionId.trim()) {
+        setGroupSession(folder, sessionId);
+      }
+    }
+  }
+  const finalSessions = getAllGroupSessions();
+  sessions = finalSessions.reduce<Session>((acc, row) => {
+    acc[row.group_folder] = row.session_id;
+    return acc;
+  }, {});
 }
 
 function saveState(): void {
-  saveJson(path.join(DATA_DIR, 'router_state.json'), { last_agent_timestamp: lastAgentTimestamp });
   saveJson(path.join(DATA_DIR, 'sessions.json'), sessions);
 }
 
@@ -236,6 +330,7 @@ async function sendMessage(chatId: string, text: string): Promise<void> {
 
 interface TelegramMessage {
   chatId: string;
+  messageId: string;
   senderId: string;
   senderName: string;
   content: string;
@@ -285,16 +380,19 @@ async function processMessage(msg: TelegramMessage): Promise<boolean> {
     logger.debug({ chatId: msg.chatId }, 'Message from unregistered Telegram chat');
     return false;
   }
-
-  const content = msg.content.trim();
+  recordMessage('telegram');
 
   // Get all messages since last agent interaction so the session has full context
-  const sinceTimestamp = lastAgentTimestamp[msg.chatId] || '';
-  let missedMessages = getMessagesSince(msg.chatId, sinceTimestamp, ASSISTANT_NAME);
+  const chatState = getChatState(msg.chatId);
+  let missedMessages = getMessagesSinceCursor(
+    msg.chatId,
+    chatState?.last_agent_timestamp || null,
+    chatState?.last_agent_message_id || null
+  );
   if (missedMessages.length === 0) {
     logger.warn({ chatId: msg.chatId }, 'No missed messages found; falling back to current message');
     missedMessages = [{
-      id: `fallback-${Date.now()}`,
+      id: msg.messageId,
       chat_jid: msg.chatId,
       sender: msg.senderId,
       sender_name: msg.senderName,
@@ -310,7 +408,7 @@ async function processMessage(msg: TelegramMessage): Promise<boolean> {
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;');
-    return `<message sender="${escapeXml(m.sender_name)}" time="${m.timestamp}">${escapeXml(m.content)}</message>`;
+    return `<message sender="${escapeXml(m.sender_name)}" sender_id="${escapeXml(m.sender)}" time="${m.timestamp}">${escapeXml(m.content)}</message>`;
   });
   const prompt = `<messages>\n${lines.join('\n')}\n</messages>`;
   const traceId = `trace-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -343,12 +441,53 @@ async function processMessage(msg: TelegramMessage): Promise<boolean> {
   logger.info({ group: group.name, messageCount: missedMessages.length }, 'Processing message');
 
   await setTyping(msg.chatId);
+  const recallQuery = missedMessages.map(m => m.content).join('\n');
+  const memoryRecall = buildMemoryRecall({
+    groupFolder: group.folder,
+    userId: msg.senderId,
+    query: recallQuery || msg.content,
+    maxResults: MEMORY_RECALL_MAX_RESULTS,
+    maxTokens: MEMORY_RECALL_MAX_TOKENS
+  });
+  const userProfile = buildUserProfile({
+    groupFolder: group.folder,
+    userId: msg.senderId
+  });
+  const memoryStats = getMemoryStats({
+    groupFolder: group.folder,
+    userId: msg.senderId
+  });
+  const behaviorConfig = loadBehaviorConfig();
+  const toolPolicy = getEffectiveToolPolicy({
+    groupFolder: group.folder,
+    userId: msg.senderId
+  });
+  const defaultModel = process.env.OPENROUTER_MODEL || 'moonshotai/kimi-k2.5';
+  const resolvedModel = resolveModel({
+    groupFolder: group.folder,
+    userId: msg.senderId,
+    defaultModel
+  });
+
   let output: ContainerOutput | null = null;
   try {
-    output = await runAgent(group, prompt, msg.chatId);
+    output = await runAgent(group, prompt, msg.chatId, {
+      userId: msg.senderId,
+      userName: msg.senderName,
+      memoryRecall,
+      userProfile,
+      memoryStats,
+      behaviorConfig: behaviorConfig as unknown as Record<string, unknown>,
+      toolPolicy: toolPolicy as Record<string, unknown>,
+      modelOverride: resolvedModel.model,
+      modelContextTokens: resolvedModel.override?.context_window,
+      modelMaxOutputTokens: resolvedModel.override?.max_output_tokens,
+      modelTemperature: resolvedModel.override?.temperature
+    });
   }
   catch (err) {
     logger.error({ group: group.name, err }, 'Agent error');
+    recordError('agent');
     recordTrace(null, err instanceof Error ? err.message : String(err));
     await sendMessage(msg.chatId, 'Sorry, I ran into an error while processing that.');
     return false;
@@ -361,12 +500,16 @@ async function processMessage(msg: TelegramMessage): Promise<boolean> {
 
   if (output.status === 'error') {
     logger.error({ group: group.name, error: output.error }, 'Container agent error');
+    recordError('agent');
     recordTrace(output, output.error);
     await sendMessage(msg.chatId, 'Sorry, I ran into an error while processing that.');
     return false;
   }
 
-  lastAgentTimestamp[msg.chatId] = msg.timestamp;
+  const lastMessage = missedMessages[missedMessages.length - 1];
+  if (lastMessage) {
+    updateChatState(msg.chatId, lastMessage.timestamp, lastMessage.id);
+  }
   saveState();
 
   if (output.result && output.result.trim()) {
@@ -381,11 +524,43 @@ async function processMessage(msg: TelegramMessage): Promise<boolean> {
   }
 
   recordTrace(output);
+  if (output.latency_ms) {
+    recordLatency(output.latency_ms);
+  }
+  if (output.tool_calls && output.tool_calls.length > 0) {
+    logToolCalls({
+      traceId,
+      chatJid: msg.chatId,
+      groupFolder: group.folder,
+      toolCalls: output.tool_calls,
+      source: 'message'
+    });
+    for (const call of output.tool_calls) {
+      recordToolCall(call.name, call.ok);
+    }
+  }
 
   return true;
 }
 
-async function runAgent(group: RegisteredGroup, prompt: string, chatId: string): Promise<ContainerOutput> {
+async function runAgent(
+  group: RegisteredGroup,
+  prompt: string,
+  chatId: string,
+  options?: {
+    userId?: string;
+    userName?: string;
+    memoryRecall?: string[];
+    userProfile?: string | null;
+    memoryStats?: { total: number; user: number; group: number; global: number };
+    behaviorConfig?: Record<string, unknown>;
+    toolPolicy?: Record<string, unknown>;
+    modelOverride?: string;
+    modelContextTokens?: number;
+    modelMaxOutputTokens?: number;
+    modelTemperature?: number;
+  }
+): Promise<ContainerOutput> {
   const isMain = group.folder === MAIN_GROUP_FOLDER;
   const sessionId = sessions[group.folder];
 
@@ -403,19 +578,33 @@ async function runAgent(group: RegisteredGroup, prompt: string, chatId: string):
 
   // For Telegram, we don't have dynamic group discovery like WhatsApp
   // Just pass the registered groups
-  writeGroupsSnapshot(group.folder, isMain, [], new Set(Object.keys(registeredGroups)));
+  writeGroupsSnapshot(group.folder, isMain, []);
 
   try {
-    const output = await runContainerAgent(group, {
-      prompt,
-      sessionId,
-      groupFolder: group.folder,
-      chatJid: chatId,
-      isMain
-    });
+    const output = await withGroupLock(group.folder, () =>
+      runContainerAgent(group, {
+        prompt,
+        sessionId,
+        groupFolder: group.folder,
+        chatJid: chatId,
+        isMain,
+        userId: options?.userId,
+        userName: options?.userName,
+        memoryRecall: options?.memoryRecall,
+        userProfile: options?.userProfile ?? null,
+        memoryStats: options?.memoryStats,
+        behaviorConfig: options?.behaviorConfig,
+        toolPolicy: options?.toolPolicy,
+        modelOverride: options?.modelOverride,
+        modelContextTokens: options?.modelContextTokens,
+        modelMaxOutputTokens: options?.modelMaxOutputTokens,
+        modelTemperature: options?.modelTemperature
+      })
+    );
 
     if (output.newSessionId) {
       sessions[group.folder] = output.newSessionId;
+      setGroupSession(group.folder, output.newSessionId);
       saveJson(path.join(DATA_DIR, 'sessions.json'), sessions);
     }
 
@@ -459,6 +648,8 @@ function startIpcWatcher(): void {
       const isMain = sourceGroup === MAIN_GROUP_FOLDER;
       const messagesDir = path.join(ipcBaseDir, sourceGroup, 'messages');
       const tasksDir = path.join(ipcBaseDir, sourceGroup, 'tasks');
+      const requestsDir = path.join(ipcBaseDir, sourceGroup, 'requests');
+      const responsesDir = path.join(ipcBaseDir, sourceGroup, 'responses');
 
       // Process messages from this group's IPC directory
       try {
@@ -512,6 +703,33 @@ function startIpcWatcher(): void {
         }
       } catch (err) {
         logger.error({ err, sourceGroup }, 'Error reading IPC tasks directory');
+      }
+
+      // Process request/response IPC for synchronous operations (memory, etc.)
+      try {
+        if (fs.existsSync(requestsDir)) {
+          fs.mkdirSync(responsesDir, { recursive: true });
+          const requestFiles = fs.readdirSync(requestsDir).filter(f => f.endsWith('.json'));
+          for (const file of requestFiles) {
+            const filePath = path.join(requestsDir, file);
+            try {
+              const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+              const response = await processRequestIpc(data, sourceGroup, isMain);
+              if (response?.id) {
+                const responsePath = path.join(responsesDir, `${response.id}.json`);
+                fs.writeFileSync(responsePath, JSON.stringify(response, null, 2));
+              }
+              fs.unlinkSync(filePath);
+            } catch (err) {
+              logger.error({ file, sourceGroup, err }, 'Error processing IPC request');
+              const errorDir = path.join(ipcBaseDir, 'errors');
+              fs.mkdirSync(errorDir, { recursive: true });
+              fs.renameSync(filePath, path.join(errorDir, `${sourceGroup}-${file}`));
+            }
+          }
+        }
+      } catch (err) {
+        logger.error({ err, sourceGroup }, 'Error reading IPC requests directory');
       }
     }
 
@@ -583,6 +801,8 @@ async function processTaskIpc(
     trigger?: string;
     containerConfig?: RegisteredGroup['containerConfig'];
     model?: string;
+    scope?: 'global' | 'group' | 'user';
+    target_id?: string;
   },
   sourceGroup: string,
   isMain: boolean
@@ -722,23 +942,124 @@ async function processTaskIpc(
       }
       {
         const defaultModel = process.env.OPENROUTER_MODEL || 'moonshotai/kimi-k2.5';
-        const config = loadModelConfig(MODEL_CONFIG_PATH, defaultModel);
+        const config = loadModelRegistry(defaultModel);
         const nextModel = data.model.trim();
-        if (!isModelAllowed(config, nextModel)) {
+        if (config.allowlist && config.allowlist.length > 0 && !config.allowlist.includes(nextModel)) {
           logger.warn({ model: nextModel }, 'Model not in allowlist; refusing set_model');
           break;
         }
-        saveModelConfig(MODEL_CONFIG_PATH, {
-          ...config,
-          model: nextModel,
-          updated_at: new Date().toISOString()
-        });
-        logger.info({ model: nextModel }, 'Model updated via IPC');
+        const scope = typeof data.scope === 'string' ? data.scope : 'global';
+        const targetId = typeof data.target_id === 'string' ? data.target_id : undefined;
+        if (scope === 'user' && !targetId) {
+          logger.warn({ data }, 'set_model missing target_id for user scope');
+          break;
+        }
+        if (scope === 'group' && !targetId) {
+          logger.warn({ data }, 'set_model missing target_id for group scope');
+          break;
+        }
+        const nextConfig = { ...config };
+        if (scope === 'global') {
+          nextConfig.model = nextModel;
+        } else if (scope === 'group') {
+          nextConfig.per_group = nextConfig.per_group || {};
+          nextConfig.per_group[targetId!] = { model: nextModel };
+        } else if (scope === 'user') {
+          nextConfig.per_user = nextConfig.per_user || {};
+          nextConfig.per_user[targetId!] = { model: nextModel };
+        }
+        nextConfig.updated_at = new Date().toISOString();
+        saveModelRegistry(nextConfig);
+        logger.info({ model: nextModel, scope, targetId }, 'Model updated via IPC');
       }
       break;
 
     default:
       logger.warn({ type: data.type }, 'Unknown IPC task type');
+  }
+}
+
+async function processRequestIpc(
+  data: {
+    id?: string;
+    type: string;
+    payload?: Record<string, unknown>;
+  },
+  sourceGroup: string,
+  isMain: boolean
+): Promise<{ id?: string; ok: boolean; result?: unknown; error?: string }> {
+  const requestId = typeof data.id === 'string' ? data.id : undefined;
+  const payload = data.payload || {};
+
+  const resolveGroupFolder = (): string => {
+    const target = typeof payload.target_group === 'string' ? payload.target_group : null;
+    if (target && isMain) return target;
+    return sourceGroup;
+  };
+
+  try {
+    switch (data.type) {
+      case 'memory_upsert': {
+        const items = coerceMemoryItems(payload.items);
+        const groupFolder = resolveGroupFolder();
+        const source = typeof payload.source === 'string' ? payload.source : 'agent';
+        const results = upsertMemoryItems(groupFolder, items, source);
+        return { id: requestId, ok: true, result: { count: results.length } };
+      }
+      case 'memory_forget': {
+        const groupFolder = resolveGroupFolder();
+        const ids = Array.isArray(payload.ids) ? (payload.ids as string[]) : undefined;
+        const content = typeof payload.content === 'string' ? payload.content : undefined;
+        const scope = isMemoryScope(payload.scope) ? payload.scope : undefined;
+        const userId = typeof payload.userId === 'string' ? payload.userId : undefined;
+        const count = forgetMemories({
+          groupFolder,
+          ids,
+          content,
+          scope,
+          userId
+        });
+        return { id: requestId, ok: true, result: { count } };
+      }
+      case 'memory_list': {
+        const groupFolder = resolveGroupFolder();
+        const scope = isMemoryScope(payload.scope) ? payload.scope : undefined;
+        const type = isMemoryType(payload.type) ? payload.type : undefined;
+        const userId = typeof payload.userId === 'string' ? payload.userId : undefined;
+        const limit = typeof payload.limit === 'number' ? payload.limit : undefined;
+        const items = listMemories({
+          groupFolder,
+          scope,
+          type,
+          userId,
+          limit
+        });
+        return { id: requestId, ok: true, result: { items } };
+      }
+      case 'memory_search': {
+        const groupFolder = resolveGroupFolder();
+        const query = typeof payload.query === 'string' ? payload.query : '';
+        const userId = typeof payload.userId === 'string' ? payload.userId : undefined;
+        const limit = typeof payload.limit === 'number' ? payload.limit : undefined;
+        const results = searchMemories({
+          groupFolder,
+          userId,
+          query,
+          limit
+        });
+        return { id: requestId, ok: true, result: { items: results } };
+      }
+      case 'memory_stats': {
+        const groupFolder = resolveGroupFolder();
+        const userId = typeof payload.userId === 'string' ? payload.userId : undefined;
+        const stats = getMemoryStats({ groupFolder, userId });
+        return { id: requestId, ok: true, result: { stats } };
+      }
+      default:
+        return { id: requestId, ok: false, error: `Unknown request type: ${data.type}` };
+    }
+  } catch (err) {
+    return { id: requestId, ok: false, error: err instanceof Error ? err.message : String(err) };
   }
 }
 
@@ -754,6 +1075,7 @@ function setupTelegramHandlers(): void {
     const senderName = ctx.from?.first_name || ctx.from?.username || 'User';
     const content = ctx.message.text;
     const timestamp = new Date(ctx.message.date * 1000).toISOString();
+    const messageId = String(ctx.message.message_id);
 
     logger.info({ chatId, isGroup, senderName }, `Telegram message: ${content.substring(0, 50)}...`);
 
@@ -790,6 +1112,7 @@ function setupTelegramHandlers(): void {
 
     enqueueMessage({
       chatId,
+      messageId,
       senderId,
       senderName,
       content,
@@ -840,7 +1163,13 @@ async function main(): Promise<void> {
 
   ensureDockerRunning();
   initDatabase();
+  initMemoryStore();
+  const expiredMemories = cleanupExpiredMemories();
+  if (expiredMemories > 0) {
+    logger.info({ expiredMemories }, 'Expired memories cleaned up');
+  }
   logger.info('Database initialized');
+  startMetricsServer();
   loadState();
 
   // Set up Telegram message handlers
@@ -865,7 +1194,12 @@ async function main(): Promise<void> {
     startSchedulerLoop({
       sendMessage,
       registeredGroups: () => registeredGroups,
-      getSessions: () => sessions
+      getSessions: () => sessions,
+      setSession: (groupFolder, sessionId) => {
+        sessions[groupFolder] = sessionId;
+        setGroupSession(groupFolder, sessionId);
+        saveJson(path.join(DATA_DIR, 'sessions.json'), sessions);
+      }
     });
     startIpcWatcher();
 

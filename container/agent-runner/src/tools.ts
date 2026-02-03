@@ -10,11 +10,33 @@ const DEFAULT_BASH_TIMEOUT_MS = parseInt(process.env.DOTCLAW_BASH_TIMEOUT_MS || 
 const DEFAULT_BASH_OUTPUT_LIMIT = parseInt(process.env.DOTCLAW_BASH_OUTPUT_LIMIT_BYTES || '200000', 10);
 const DEFAULT_WEBFETCH_MAX_BYTES = parseInt(process.env.DOTCLAW_WEBFETCH_MAX_BYTES || '1000000', 10);
 const DEFAULT_GREP_MAX_FILE_BYTES = parseInt(process.env.DOTCLAW_GREP_MAX_FILE_BYTES || '1000000', 10);
+const DEFAULT_PLUGIN_MAX_BYTES = parseInt(process.env.DOTCLAW_PLUGIN_MAX_BYTES || '800000', 10);
 
 const WORKSPACE_GROUP = '/workspace/group';
 const WORKSPACE_GLOBAL = '/workspace/global';
 const WORKSPACE_EXTRA = '/workspace/extra';
 const WORKSPACE_PROJECT = '/workspace/project';
+
+const DEFAULT_PLUGIN_DIRS = [
+  path.join(WORKSPACE_GROUP, 'plugins'),
+  path.join(WORKSPACE_GLOBAL, 'plugins')
+];
+
+const PLUGIN_SCHEMA = z.object({
+  name: z.string().min(1),
+  description: z.string().min(1),
+  type: z.enum(['http', 'bash']),
+  method: z.string().optional(),
+  url: z.string().optional(),
+  headers: z.record(z.string(), z.string()).optional(),
+  query_params: z.record(z.string(), z.string()).optional(),
+  body: z.record(z.string(), z.any()).optional(),
+  command: z.string().optional(),
+  input: z.record(z.string(), z.enum(['string', 'number', 'boolean'])).optional(),
+  required: z.array(z.string()).optional()
+});
+
+type PluginConfig = z.infer<typeof PLUGIN_SCHEMA>;
 
 export type ToolCallRecord = {
   name: string;
@@ -25,6 +47,13 @@ export type ToolCallRecord = {
 };
 
 type ToolCallLogger = (record: ToolCallRecord) => void;
+
+export type ToolPolicy = {
+  allow?: string[];
+  deny?: string[];
+  max_per_run?: Record<string, number>;
+  default_max_per_run?: number;
+};
 
 function getAllowedRoots(isMain: boolean): string[] {
   const roots = [WORKSPACE_GROUP, WORKSPACE_GLOBAL, WORKSPACE_EXTRA];
@@ -143,6 +172,62 @@ function globToRegex(pattern: string): RegExp {
   return new RegExp(`^${regex}$`);
 }
 
+function expandEnv(value: string): string {
+  return value.replace(/\$\{([A-Z0-9_]+)\}/g, (_match, key: string) => {
+    return process.env[key] || '';
+  });
+}
+
+function interpolateTemplate(value: string, args: Record<string, unknown>): string {
+  const expanded = expandEnv(value);
+  return expanded.replace(/\{\{([a-zA-Z0-9_]+)\}\}/g, (_match, key: string) => {
+    const replacement = args[key];
+    if (replacement === undefined || replacement === null) return '';
+    return String(replacement);
+  });
+}
+
+function buildInputSchema(config: PluginConfig) {
+  const shape: Record<string, z.ZodTypeAny> = {};
+  const input = config.input || {};
+  const required = new Set(config.required || []);
+
+  for (const [key, value] of Object.entries(input)) {
+    let schema: z.ZodTypeAny;
+    if (value === 'number') schema = z.number();
+    else if (value === 'boolean') schema = z.boolean();
+    else schema = z.string();
+    shape[key] = required.has(key) ? schema : schema.optional();
+  }
+
+  return z.object(shape).passthrough();
+}
+
+function loadPluginConfigs(): PluginConfig[] {
+  const configuredDirs = (process.env.DOTCLAW_PLUGIN_DIRS || '')
+    .split(',')
+    .map(dir => dir.trim())
+    .filter(Boolean);
+  const dirs = configuredDirs.length > 0 ? configuredDirs : DEFAULT_PLUGIN_DIRS;
+  const configs: PluginConfig[] = [];
+
+  for (const dir of dirs) {
+    if (!fs.existsSync(dir)) continue;
+    const files = fs.readdirSync(dir).filter(file => file.endsWith('.json'));
+    for (const file of files) {
+      try {
+        const raw = JSON.parse(fs.readFileSync(path.join(dir, file), 'utf-8'));
+        const parsed = PLUGIN_SCHEMA.parse(raw);
+        configs.push(parsed);
+      } catch {
+        // ignore malformed plugin
+      }
+    }
+  }
+
+  return configs;
+}
+
 function getSearchRoot(patternPosix: string): string {
   const globIndex = patternPosix.search(/[*?]/);
   if (globIndex === -1) {
@@ -220,7 +305,6 @@ async function runCommand(command: string, timeoutMs: number, outputLimit: numbe
     const append = (chunk: Buffer | string, isStdout: boolean) => {
       if (truncated) return;
       const text = chunk.toString();
-      const current = isStdout ? stdout : stderr;
       const remaining = maxBytes - Buffer.byteLength(stdout + stderr, 'utf-8');
       if (remaining <= 0) {
         truncated = true;
@@ -294,10 +378,22 @@ async function readResponseWithLimit(response: Response, maxBytes: number): Prom
   return { body: Buffer.from(buffer).subarray(0, maxBytes), truncated: true };
 }
 
-export function createTools(ctx: IpcContext, options?: { onToolCall?: ToolCallLogger }) {
+export function createTools(ctx: IpcContext, options?: { onToolCall?: ToolCallLogger; policy?: ToolPolicy }) {
   const ipc = createIpcHandlers(ctx);
   const isMain = ctx.isMain;
   const onToolCall = options?.onToolCall;
+  const policy = options?.policy;
+  const allowList = (policy?.allow || []).map(item => item.toLowerCase());
+  const denyList = (policy?.deny || []).map(item => item.toLowerCase());
+  const maxPerRunConfig = policy?.max_per_run || {};
+  const maxPerRun = new Map<string, number>();
+  for (const [key, value] of Object.entries(maxPerRunConfig)) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      maxPerRun.set(key.toLowerCase(), value);
+    }
+  }
+  const defaultMax = policy?.default_max_per_run ?? 12;
+  const usageCounts = new Map<string, number>();
 
   const enableBash = isEnabled('DOTCLAW_ENABLE_BASH', true);
   const enableWebSearch = isEnabled('DOTCLAW_ENABLE_WEBSEARCH', true);
@@ -315,6 +411,20 @@ export function createTools(ctx: IpcContext, options?: { onToolCall?: ToolCallLo
     return async (args: TInput): Promise<TOutput> => {
       const start = Date.now();
       try {
+        const normalized = name.toLowerCase();
+        if (denyList.includes(normalized)) {
+          throw new Error(`Tool is disabled by policy: ${name}`);
+        }
+        if (allowList.length > 0 && !allowList.includes(normalized)) {
+          throw new Error(`Tool not allowed by policy: ${name}`);
+        }
+        const currentCount = usageCounts.get(name) || 0;
+        const maxAllowed = maxPerRun.get(normalized) ?? defaultMax;
+        if (Number.isFinite(maxAllowed) && maxAllowed > 0 && currentCount >= maxAllowed) {
+          throw new Error(`Tool usage limit reached for ${name} (max ${maxAllowed} per run)`);
+        }
+        usageCounts.set(name, currentCount + 1);
+
         const result = await execute(args);
         onToolCall?.({
           name,
@@ -651,8 +761,8 @@ export function createTools(ctx: IpcContext, options?: { onToolCall?: ToolCallLo
         const text = await response.text();
         throw new Error(`Brave search error (${response.status}): ${text}`);
       }
-      const data = await response.json();
-      const results = (data?.web?.results || []).map((result: any) => ({
+      const data = await response.json() as { web?: { results?: Array<Record<string, unknown>> } };
+      const results = (data?.web?.results || []).map((result) => ({
         title: result?.title ?? null,
         url: result?.url ?? null,
         description: result?.description ?? result?.snippet ?? null
@@ -660,6 +770,99 @@ export function createTools(ctx: IpcContext, options?: { onToolCall?: ToolCallLo
       return { query, results };
     })
   });
+
+  const pluginTools = loadPluginConfigs().map((config) => {
+    const inputSchema = buildInputSchema(config);
+    const toolName = `plugin__${config.name}`;
+
+    if (config.type === 'http') {
+      return tool({
+        name: toolName,
+        description: config.description,
+        inputSchema,
+        outputSchema: z.object({
+          status: z.number(),
+          contentType: z.string().nullable(),
+          body: z.string(),
+          truncated: z.boolean()
+        }),
+        execute: wrapExecute(toolName, async (args: Record<string, unknown>) => {
+          if (!config.url) {
+            throw new Error(`Plugin ${config.name} missing url`);
+          }
+          const method = (config.method || 'GET').toUpperCase();
+          let url = interpolateTemplate(config.url, args);
+
+          const queryParams = config.query_params || {};
+          const queryEntries: Record<string, string> = {};
+          for (const [key, value] of Object.entries(queryParams)) {
+            queryEntries[key] = interpolateTemplate(String(value), args);
+          }
+          const queryString = new URLSearchParams(queryEntries).toString();
+          if (queryString) {
+            url += (url.includes('?') ? '&' : '?') + queryString;
+          }
+
+          const headers: Record<string, string> = {};
+          if (config.headers) {
+            for (const [key, value] of Object.entries(config.headers)) {
+              headers[key] = interpolateTemplate(String(value), args);
+            }
+          }
+
+          let body: string | undefined;
+          if (config.body && method !== 'GET') {
+            const payload: Record<string, unknown> = {};
+            for (const [key, value] of Object.entries(config.body)) {
+              if (typeof value === 'string') {
+                payload[key] = interpolateTemplate(value, args);
+              } else {
+                payload[key] = value;
+              }
+            }
+            body = JSON.stringify(payload);
+            headers['Content-Type'] = headers['Content-Type'] || 'application/json';
+          }
+
+          const response = await fetch(url, { method, headers, body });
+          const { body: responseBody, truncated } = await readResponseWithLimit(response, DEFAULT_PLUGIN_MAX_BYTES);
+          const contentType = response.headers.get('content-type');
+          const text = responseBody.toString('utf-8');
+          const limited = limitText(text, DEFAULT_TOOL_OUTPUT_LIMIT);
+          return {
+            status: response.status,
+            contentType,
+            body: limited.text,
+            truncated: truncated || limited.truncated
+          };
+        })
+      });
+    }
+
+    if (config.type === 'bash') {
+      return tool({
+        name: toolName,
+        description: config.description,
+        inputSchema,
+        outputSchema: z.object({
+          stdout: z.string(),
+          stderr: z.string(),
+          exitCode: z.number().int().nullable(),
+          durationMs: z.number(),
+          truncated: z.boolean()
+        }),
+        execute: wrapExecute(toolName, async (args: Record<string, unknown>) => {
+          if (!config.command) {
+            throw new Error(`Plugin ${config.name} missing command`);
+          }
+          const command = interpolateTemplate(config.command, args);
+          return runCommand(command, DEFAULT_BASH_TIMEOUT_MS, DEFAULT_BASH_OUTPUT_LIMIT);
+        })
+      });
+    }
+
+    return null;
+  }).filter(Boolean) as Array<ReturnType<typeof tool>>;
 
   const sendMessageTool = tool({
     name: 'mcp__dotclaw__send_message',
@@ -761,13 +964,114 @@ export function createTools(ctx: IpcContext, options?: { onToolCall?: ToolCallLo
     name: 'mcp__dotclaw__set_model',
     description: 'Set the active OpenRouter model (main group only).',
     inputSchema: z.object({
-      model: z.string().describe('OpenRouter model ID (e.g., moonshotai/kimi-k2.5)')
+      model: z.string().describe('OpenRouter model ID (e.g., moonshotai/kimi-k2.5)'),
+      scope: z.enum(['global', 'group', 'user']).optional(),
+      target_id: z.string().optional().describe('Optional group folder or user id for scoped overrides')
     }),
     outputSchema: z.object({
       ok: z.boolean(),
       error: z.string().optional()
     }),
-    execute: wrapExecute('mcp__dotclaw__set_model', async ({ model }: { model: string }) => ipc.setModel({ model }))
+    execute: wrapExecute('mcp__dotclaw__set_model', async ({ model, scope, target_id }: { model: string; scope?: 'global' | 'group' | 'user'; target_id?: string }) =>
+      ipc.setModel({ model, scope, target_id }))
+  });
+
+  const memoryUpsertTool = tool({
+    name: 'mcp__dotclaw__memory_upsert',
+    description: 'Upsert long-term memory items (use for durable user or group facts/preferences).',
+    inputSchema: z.object({
+      items: z.array(z.object({
+        scope: z.enum(['user', 'group', 'global']),
+        subject_id: z.string().optional(),
+        type: z.enum(['identity', 'preference', 'fact', 'relationship', 'project', 'task', 'note', 'archive']),
+        content: z.string(),
+        importance: z.number().min(0).max(1).optional(),
+        confidence: z.number().min(0).max(1).optional(),
+        tags: z.array(z.string()).optional(),
+        ttl_days: z.number().optional()
+      })),
+      source: z.string().optional(),
+      target_group: z.string().optional()
+    }),
+    outputSchema: z.object({
+      ok: z.boolean(),
+      result: z.any().optional(),
+      error: z.string().optional()
+    }),
+    execute: wrapExecute('mcp__dotclaw__memory_upsert', async ({ items, source, target_group }: { items: unknown[]; source?: string; target_group?: string }) =>
+      ipc.memoryUpsert({ items, source, target_group }))
+  });
+
+  const memoryForgetTool = tool({
+    name: 'mcp__dotclaw__memory_forget',
+    description: 'Forget long-term memory items by id or content.',
+    inputSchema: z.object({
+      ids: z.array(z.string()).optional(),
+      content: z.string().optional(),
+      scope: z.enum(['user', 'group', 'global']).optional(),
+      userId: z.string().optional(),
+      target_group: z.string().optional()
+    }),
+    outputSchema: z.object({
+      ok: z.boolean(),
+      result: z.any().optional(),
+      error: z.string().optional()
+    }),
+    execute: wrapExecute('mcp__dotclaw__memory_forget', async (args: { ids?: string[]; content?: string; scope?: string; userId?: string; target_group?: string }) =>
+      ipc.memoryForget(args))
+  });
+
+  const memoryListTool = tool({
+    name: 'mcp__dotclaw__memory_list',
+    description: 'List long-term memory items for the current group/user.',
+    inputSchema: z.object({
+      scope: z.enum(['user', 'group', 'global']).optional(),
+      type: z.enum(['identity', 'preference', 'fact', 'relationship', 'project', 'task', 'note', 'archive']).optional(),
+      userId: z.string().optional(),
+      limit: z.number().int().positive().optional(),
+      target_group: z.string().optional()
+    }),
+    outputSchema: z.object({
+      ok: z.boolean(),
+      result: z.any().optional(),
+      error: z.string().optional()
+    }),
+    execute: wrapExecute('mcp__dotclaw__memory_list', async (args: { scope?: string; type?: string; userId?: string; limit?: number; target_group?: string }) =>
+      ipc.memoryList(args))
+  });
+
+  const memorySearchTool = tool({
+    name: 'mcp__dotclaw__memory_search',
+    description: 'Search long-term memory items.',
+    inputSchema: z.object({
+      query: z.string(),
+      userId: z.string().optional(),
+      limit: z.number().int().positive().optional(),
+      target_group: z.string().optional()
+    }),
+    outputSchema: z.object({
+      ok: z.boolean(),
+      result: z.any().optional(),
+      error: z.string().optional()
+    }),
+    execute: wrapExecute('mcp__dotclaw__memory_search', async (args: { query: string; userId?: string; limit?: number; target_group?: string }) =>
+      ipc.memorySearch(args))
+  });
+
+  const memoryStatsTool = tool({
+    name: 'mcp__dotclaw__memory_stats',
+    description: 'Get memory stats for the group/user.',
+    inputSchema: z.object({
+      userId: z.string().optional(),
+      target_group: z.string().optional()
+    }),
+    outputSchema: z.object({
+      ok: z.boolean(),
+      result: z.any().optional(),
+      error: z.string().optional()
+    }),
+    execute: wrapExecute('mcp__dotclaw__memory_stats', async (args: { userId?: string; target_group?: string }) =>
+      ipc.memoryStats(args))
   });
 
   const tools: Array<ReturnType<typeof tool>> = [
@@ -782,8 +1086,14 @@ export function createTools(ctx: IpcContext, options?: { onToolCall?: ToolCallLo
     pauseTaskTool,
     resumeTaskTool,
     cancelTaskTool,
+    memoryUpsertTool,
+    memoryForgetTool,
+    memoryListTool,
+    memorySearchTool,
+    memoryStatsTool,
     registerGroupTool,
-    setModelTool
+    setModelTool,
+    ...pluginTools
   ];
 
   if (enableBash) tools.push(bashTool as ReturnType<typeof tool>);

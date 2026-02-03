@@ -90,18 +90,34 @@ else
   warn "Docker not found; skipping container build"
 fi
 
-AUTOTUNE_DIR="${AUTOTUNE_DIR:-$PROJECT_ROOT/../autotune}"
+AUTOTUNE_DIR="${AUTOTUNE_DIR:-}"
+AUTOTUNE_NODE_MODULES_DIR="$PROJECT_ROOT/node_modules/@dotsetlabs/autotune"
+if [[ -z "$AUTOTUNE_DIR" ]]; then
+  if [[ -d "$AUTOTUNE_NODE_MODULES_DIR" ]]; then
+    AUTOTUNE_DIR="$AUTOTUNE_NODE_MODULES_DIR"
+  else
+    AUTOTUNE_DIR="$PROJECT_ROOT/../autotune"
+  fi
+fi
 if [[ -d "$AUTOTUNE_DIR" ]]; then
   AUTOTUNE_DIR="$(cd "$AUTOTUNE_DIR" && pwd)"
   log "Autotune directory found: $AUTOTUNE_DIR"
-  run_as_user "cd $AUTOTUNE_DIR && npm install"
-  run_as_user "cd $AUTOTUNE_DIR && npm run build"
+  if [[ -d "$AUTOTUNE_DIR/src" ]]; then
+    run_as_user "cd $AUTOTUNE_DIR && npm install"
+    run_as_user "cd $AUTOTUNE_DIR && npm run build"
+  fi
 else
   warn "Autotune directory not found at $AUTOTUNE_DIR"
-  warn "Clone it beside DotClaw to enable automatic self-improvement"
+  if [[ -d "$AUTOTUNE_NODE_MODULES_DIR" ]]; then
+    warn "Autotune is installed under node_modules."
+    warn "Set AUTOTUNE_DIR=$AUTOTUNE_NODE_MODULES_DIR to enable the systemd timer."
+  else
+    warn "Clone it beside DotClaw to enable automatic self-improvement"
+  fi
 fi
 
-AUTOTUNE_ENV="$AUTOTUNE_DIR/autotune.env"
+AUTOTUNE_ENV="$PROJECT_ROOT/data/autotune.env"
+mkdir -p "$PROJECT_ROOT/data"
 OPENROUTER_KEY="$(grep -E '^OPENROUTER_API_KEY=' "$PROJECT_ROOT/.env" | head -n1 | cut -d= -f2- || true)"
 OPENROUTER_SITE_URL="$(grep -E '^OPENROUTER_SITE_URL=' "$PROJECT_ROOT/.env" | head -n1 | cut -d= -f2- || true)"
 OPENROUTER_SITE_NAME="$(grep -E '^OPENROUTER_SITE_NAME=' "$PROJECT_ROOT/.env" | head -n1 | cut -d= -f2- || true)"
@@ -113,6 +129,9 @@ OPENROUTER_SITE_URL=$OPENROUTER_SITE_URL
 OPENROUTER_SITE_NAME=${OPENROUTER_SITE_NAME:-DotClaw}
 AUTOTUNE_OUTPUT_DIR=$PROMPTS_DIR
 AUTOTUNE_TRACE_DIR=$TRACES_DIR
+AUTOTUNE_BEHAVIOR_ENABLED=1
+AUTOTUNE_BEHAVIOR_CONFIG_PATH=$PROJECT_ROOT/data/behavior.json
+AUTOTUNE_BEHAVIOR_REPORT_DIR=$PROJECT_ROOT/data
 EOF
   chmod 600 "$AUTOTUNE_ENV" || true
   if [[ -z "$OPENROUTER_KEY" ]]; then
