@@ -8,9 +8,14 @@ Forked from [NanoClaw](https://github.com/gavrielc/nanoclaw).
 
 - **Telegram Integration** - Chat with your assistant from your phone via Telegram bot
 - **Container Isolation** - Each conversation runs in a Docker container with only explicitly mounted directories accessible
-- **Persistent Memory** - Per-group `CLAUDE.md` files store context that persists across sessions
+- **Long-Term Memory v2** - Durable memory store with user profiles, recall, and memory controls
 - **Scheduled Tasks** - Set up recurring or one-time tasks with cron expressions, intervals, or timestamps
 - **Web Access** - Search the web (Brave) and fetch content from URLs
+- **Tool Policy & Audit Logs** - Per-group/user tool allowlists, limits, and audit trails
+- **Plugin Tools** - Drop-in HTTP/Bash plugin manifests for custom tools
+- **Autotune & Behavior Config** - Continuous improvement loop with prompt canaries and behavior tuning
+- **Metrics Endpoint** - Prometheus-compatible metrics for production monitoring
+- **Daemon Mode** - Optional persistent containers for lower latency
 - **Multi-Group Support** - Register multiple Telegram chats with isolated contexts
 
 ## Requirements
@@ -29,6 +34,13 @@ git clone https://github.com/yourusername/dotclaw.git
 cd dotclaw
 npm install
 ```
+
+Recommended (guided setup):
+```bash
+npm run bootstrap
+```
+
+Manual setup:
 
 ### Configuration
 
@@ -59,6 +71,18 @@ DOTCLAW_SUMMARY_MAX_OUTPUT_TOKENS=1200
 DOTCLAW_SUMMARY_MODEL=moonshotai/kimi-k2.5
 ```
 
+Long-term memory v2:
+```bash
+DOTCLAW_MEMORY_RECALL_MAX_RESULTS=8
+DOTCLAW_MEMORY_RECALL_MAX_TOKENS=1200
+DOTCLAW_MEMORY_EXTRACTION_ENABLED=true
+DOTCLAW_MEMORY_EXTRACTION_MESSAGES=8
+DOTCLAW_MEMORY_EXTRACTION_MAX_OUTPUT_TOKENS=900
+DOTCLAW_MEMORY_MODEL=moonshotai/kimi-k2.5
+DOTCLAW_MEMORY_ARCHIVE_SYNC=true
+DOTCLAW_MEMORY_EXTRACT_SCHEDULED=false
+```
+
 Optional safety/tool controls:
 ```bash
 DOTCLAW_ENABLE_BASH=true
@@ -67,6 +91,16 @@ DOTCLAW_ENABLE_WEBFETCH=true
 DOTCLAW_MAX_TOOL_STEPS=12
 DOTCLAW_WEBFETCH_ALLOWLIST=example.com,developer.mozilla.org
 DOTCLAW_WEBFETCH_BLOCKLIST=localhost,127.0.0.1
+```
+
+Tool policy & plugins:
+```bash
+# Optional plugin search paths (comma-separated)
+DOTCLAW_PLUGIN_DIRS=/workspace/group/plugins,/workspace/global/plugins
+
+# IPC tuning for memory requests
+DOTCLAW_IPC_REQUEST_TIMEOUT_MS=6000
+DOTCLAW_IPC_REQUEST_POLL_MS=150
 ```
 
 Optional Docker hardening:
@@ -78,6 +112,21 @@ CONTAINER_READONLY_ROOT=true
 CONTAINER_TMPFS_SIZE=64m
 CONTAINER_RUN_UID=1000
 CONTAINER_RUN_GID=1000
+```
+
+Performance + observability:
+```bash
+DOTCLAW_CONTAINER_MODE=ephemeral   # or "daemon"
+DOTCLAW_CONTAINER_DAEMON_POLL_MS=200
+DOTCLAW_METRICS_PORT=3001
+```
+
+Autotune:
+```bash
+DOTCLAW_AUTOTUNE_DAYS=7
+DOTCLAW_AUTOTUNE_PROMPTS=false
+DOTCLAW_AUTOTUNE_EVAL_MODEL=  # optional evaluator model id
+DOTCLAW_AUTOTUNE_EVAL_SAMPLES=6
 ```
 
 2. Build the Docker container:
@@ -157,10 +206,42 @@ sudo chown -R $USER data/ groups/
 
 For a full Ubuntu VPS + systemd guide, see `docs/UBUNTU.md`.
 
+### Container Mode (Performance)
+
+By default DotClaw spawns a fresh container per request (`ephemeral`).  
+For lower latency, enable daemon mode:
+```bash
+DOTCLAW_CONTAINER_MODE=daemon
+```
+
 ### Model Switching
 
 The active model is stored in `data/model.json` and can be updated without editing `.env`.
-You can also allow chat-time switching (main group only) by using:
+
+You can set global, per-group, and per-user overrides:
+```json
+{
+  "model": "moonshotai/kimi-k2.5",
+  "allowlist": ["moonshotai/kimi-k2.5", "openai/gpt-4.1-mini"],
+  "overrides": {
+    "moonshotai/kimi-k2.5": { "context_window": 200000, "max_output_tokens": 4096 },
+    "openai/gpt-4.1-mini": { "context_window": 128000, "max_output_tokens": 4096 }
+  },
+  "per_group": {
+    "main": { "model": "openai/gpt-4.1-mini" }
+  },
+  "per_user": {
+    "123456789": { "model": "moonshotai/kimi-k2.5" }
+  },
+  "updated_at": "2026-02-03T00:00:00.000Z"
+}
+```
+
+From the main group, you can also change models via tool calls:
+```
+set model to moonshotai/kimi-k2.5
+set model to openai/gpt-4.1-mini for group main
+set model to moonshotai/kimi-k2.5 for user 123456789
 ```
 
 ### Prompt Packs (Autotune)
@@ -206,6 +287,64 @@ Optional env tuning:
 DOTCLAW_TRACE_DIR=~/.config/dotclaw/traces
 DOTCLAW_TRACE_SAMPLE_RATE=1
 ```
+
+### Tool Policy
+
+Tool permissions and limits live in `data/tool-policy.json`:
+```json
+{
+  "default": {
+    "allow": ["Read", "Write", "Edit", "Glob", "Grep", "WebSearch", "WebFetch", "Bash"],
+    "deny": [],
+    "max_per_run": { "Bash": 4, "WebSearch": 5, "WebFetch": 6 },
+    "default_max_per_run": 12
+  },
+  "groups": {
+    "main": { "allow": ["Bash", "WebSearch", "WebFetch"] }
+  },
+  "users": {
+    "123456789": { "deny": ["Bash"] }
+  }
+}
+```
+
+### Plugin Tools
+
+Drop JSON plugin manifests into `groups/<group>/plugins/` or `groups/global/plugins/`.
+Example HTTP plugin (`groups/main/plugins/github-search.json`):
+```json
+{
+  "name": "github_search",
+  "description": "Search GitHub repositories",
+  "type": "http",
+  "method": "GET",
+  "url": "https://api.github.com/search/repositories",
+  "headers": { "Authorization": "Bearer ${GITHUB_TOKEN}" },
+  "query_params": { "q": "{{query}}", "per_page": "5" },
+  "input": { "query": "string" },
+  "required": ["query"]
+}
+```
+
+The tool will be exposed as `plugin__github_search` (and must be allowed by tool policy).
+
+### Metrics
+
+Prometheus metrics are served on `http://localhost:3001/metrics` (configurable via `DOTCLAW_METRICS_PORT`).
+
+### Autotune
+
+Run the continuous optimization loop:
+```bash
+npm run autotune
+```
+This uses the published `@dotsetlabs/autotune` package and runs the full pipeline (ingest → eval → optimize → deploy → behavior tuning).
+If you want to develop Autotune locally, set `AUTOTUNE_DIR` to your checkout before running `./scripts/install.sh`.
+Optional evaluator model:
+```bash
+DOTCLAW_AUTOTUNE_EVAL_MODEL=openai/gpt-4.1-mini
+```
+Autotune writes `data/behavior.json` and optional canary prompt packs in `~/.config/dotclaw/prompts`.
 Example:
 ```
 set model to moonshotai/kimi-k2.5
@@ -247,12 +386,14 @@ This script:
 - Sets up `.env` defaults
 - Builds DotClaw and the container image
 - Creates systemd services with the correct Node path
-- Enables Autotune timer if a sibling `autotune/` repo is present
+- Enables Autotune timer if `AUTOTUNE_DIR` points to a local Autotune checkout (or node_modules path)
 
 ```
 @dotclaw_bot what's the weather in New York?
 @dotclaw_bot remind me every Monday at 9am to check my emails
 @dotclaw_bot search for recent news about AI
+@dotclaw_bot remember that my favorite color is blue
+@dotclaw_bot what do you remember about me?
 ```
 
 In your main channel, you can manage groups and tasks:
@@ -282,9 +423,12 @@ dotclaw/
 │   └── main/CLAUDE.md     # Main channel memory
 ├── data/
 │   ├── registered_groups.json
-│   └── sessions.json
+│   ├── sessions.json
+│   ├── behavior.json      # Autotune behavior config
+│   └── tool-policy.json   # Tool allowlist/limits
 └── store/
-    └── messages.db        # SQLite database
+    ├── messages.db        # SQLite database
+    └── memory.db          # Long-term memory store
 ```
 
 ## Architecture

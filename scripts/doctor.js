@@ -100,6 +100,11 @@ if (fs.existsSync(envPath)) {
   const hasBrave = envContent.includes('BRAVE_SEARCH_API_KEY=');
   log('OPENROUTER_API_KEY', hasOpenRouter ? 'set' : 'missing');
   log('BRAVE_SEARCH_API_KEY', hasBrave ? 'set (optional, enables WebSearch)' : 'missing');
+
+  const containerModeMatch = envContent.match(/^DOTCLAW_CONTAINER_MODE=(.+)$/m);
+  if (containerModeMatch) {
+    log('Container mode', containerModeMatch[1].trim());
+  }
 }
 
 checkSystemd('dotclaw.service');
@@ -121,3 +126,6 @@ if (fs.existsSync(modelConfigPath)) {
 } else {
   log('Model config', 'missing');
 }
+
+const memoryDbPath = path.join(STORE_DIR, 'memory.db');
+log('Memory DB', fs.existsSync(memoryDbPath) ? 'present' : 'missing');

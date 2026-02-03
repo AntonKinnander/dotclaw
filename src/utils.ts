@@ -14,7 +14,12 @@ export function loadJson<T>(filePath: string, defaultValue: T): T {
 
 export function saveJson(filePath: string, data: unknown): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+  const dir = path.dirname(filePath);
+  const base = path.basename(filePath);
+  const tempPath = path.join(dir, `.${base}.${process.pid}.${Date.now()}.tmp`);
+  const payload = JSON.stringify(data, null, 2);
+  fs.writeFileSync(tempPath, payload);
+  fs.renameSync(tempPath, filePath);
 }
 
 export function isSafeGroupFolder(folder: string, groupsDir: string): boolean {

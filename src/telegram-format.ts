@@ -142,10 +142,6 @@ function formatTextChunk(text: string): string {
   return formatInlineMarkdownToHtml(normalized);
 }
 
-function formatCodeBlock(code: string): string {
-  return `<pre><code>${escapeHtml(code)}</code></pre>`;
-}
-
 function splitCodeBlock(code: string, maxLength: number): string[] {
   const openTag = '<pre><code>';
   const closeTag = '</code></pre>';

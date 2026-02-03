@@ -2,11 +2,17 @@ import fs from 'fs';
 import path from 'path';
 import pino from 'pino';
 import { CronExpressionParser } from 'cron-parser';
-import { getDueTasks, updateTaskAfterRun, logTaskRun, getTaskById, getAllTasks, updateTask } from './db.js';
+import { getDueTasks, updateTaskAfterRun, logTaskRun, getTaskById, getAllTasks, updateTask, setGroupSession, logToolCalls } from './db.js';
 import { ScheduledTask, RegisteredGroup } from './types.js';
-import { GROUPS_DIR, SCHEDULER_POLL_INTERVAL, DATA_DIR, MAIN_GROUP_FOLDER, TIMEZONE } from './config.js';
+import { GROUPS_DIR, SCHEDULER_POLL_INTERVAL, MAIN_GROUP_FOLDER, TIMEZONE } from './config.js';
 import { runContainerAgent, writeTasksSnapshot } from './container-runner.js';
 import { writeTrace } from './trace-writer.js';
+import { withGroupLock } from './locks.js';
+import { buildMemoryRecall, getMemoryStats } from './memory-store.js';
+import { loadBehaviorConfig } from './behavior-config.js';
+import { getEffectiveToolPolicy } from './tool-policy.js';
+import { resolveModel } from './model-registry.js';
+import { recordTaskRun, recordToolCall, recordLatency, recordError, recordMessage } from './metrics.js';
 
 const logger = pino({
   level: process.env.LOG_LEVEL || 'info',
@@ -17,6 +23,7 @@ export interface SchedulerDependencies {
   sendMessage: (jid: string, text: string) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   getSessions: () => Record<string, string>;
+  setSession: (groupFolder: string, sessionId: string) => void;
 }
 
 async function runTask(task: ScheduledTask, deps: SchedulerDependencies): Promise<void> {
@@ -25,6 +32,7 @@ async function runTask(task: ScheduledTask, deps: SchedulerDependencies): Promis
   fs.mkdirSync(groupDir, { recursive: true });
 
   logger.info({ taskId: task.id, group: task.group_folder }, 'Running scheduled task');
+  recordMessage('scheduler');
 
   const groups = deps.registeredGroups();
   const group = Object.values(groups).find(g => g.folder === task.group_folder);
@@ -66,19 +74,57 @@ async function runTask(task: ScheduledTask, deps: SchedulerDependencies): Promis
   const traceTimestamp = new Date().toISOString();
 
   try {
-    const output = await runContainerAgent(group, {
-      prompt: task.prompt,
-      sessionId,
+    const memoryRecall = buildMemoryRecall({
       groupFolder: task.group_folder,
-      chatJid: task.chat_jid,
-      isMain,
-      isScheduledTask: true
+      userId: null,
+      query: task.prompt,
+      maxResults: 6,
+      maxTokens: 800
     });
+    const memoryStats = getMemoryStats({ groupFolder: task.group_folder, userId: null });
+    const behaviorConfig = loadBehaviorConfig();
+    const toolPolicy = getEffectiveToolPolicy({ groupFolder: task.group_folder, userId: null });
+    const defaultModel = process.env.OPENROUTER_MODEL || 'moonshotai/kimi-k2.5';
+    const resolvedModel = resolveModel({
+      groupFolder: task.group_folder,
+      userId: null,
+      defaultModel
+    });
+
+    const output = await withGroupLock(task.group_folder, () =>
+      runContainerAgent(group, {
+        prompt: task.prompt,
+        sessionId,
+        groupFolder: task.group_folder,
+        chatJid: task.chat_jid,
+        isMain,
+        isScheduledTask: true,
+        memoryRecall,
+        userProfile: null,
+        memoryStats,
+        behaviorConfig: behaviorConfig as unknown as Record<string, unknown>,
+        toolPolicy: toolPolicy as Record<string, unknown>,
+        modelOverride: resolvedModel.model,
+        modelContextTokens: resolvedModel.override?.context_window,
+        modelMaxOutputTokens: resolvedModel.override?.max_output_tokens,
+        modelTemperature: resolvedModel.override?.temperature
+      })
+    );
+
+    if (output.newSessionId && task.context_mode === 'group') {
+      deps.setSession(task.group_folder, output.newSessionId);
+      setGroupSession(task.group_folder, output.newSessionId);
+    }
 
     if (output.status === 'error') {
       error = output.error || 'Unknown error';
+      recordError('scheduler');
     } else {
       result = output.result;
+    }
+
+    if (output.latency_ms) {
+      recordLatency(output.latency_ms);
     }
 
     writeTrace({
@@ -99,10 +145,24 @@ async function runTask(task: ScheduledTask, deps: SchedulerDependencies): Promis
       source: 'dotclaw-scheduler'
     });
 
+    if (output.tool_calls && output.tool_calls.length > 0) {
+      logToolCalls({
+        traceId,
+        chatJid: task.chat_jid,
+        groupFolder: task.group_folder,
+        toolCalls: output.tool_calls,
+        source: 'scheduler'
+      });
+      for (const call of output.tool_calls) {
+        recordToolCall(call.name, call.ok);
+      }
+    }
+
     logger.info({ taskId: task.id, durationMs: Date.now() - startTime }, 'Task completed');
   } catch (err) {
     error = err instanceof Error ? err.message : String(err);
     logger.error({ taskId: task.id, error }, 'Task failed');
+    recordError('scheduler');
 
     writeTrace({
       trace_id: traceId,
@@ -128,6 +188,7 @@ async function runTask(task: ScheduledTask, deps: SchedulerDependencies): Promis
     result,
     error
   });
+  recordTaskRun(error ? 'error' : 'success');
 
   let nextRun: string | null = null;
   let scheduleError: string | null = null;

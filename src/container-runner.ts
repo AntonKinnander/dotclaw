@@ -3,7 +3,7 @@
  * Spawns agent execution in Docker container and handles IPC
  */
 
-import { spawn } from 'child_process';
+import { spawn, execSync, spawnSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import pino from 'pino';
@@ -18,6 +18,8 @@ import {
   CONTAINER_TMPFS_SIZE,
   CONTAINER_RUN_UID,
   CONTAINER_RUN_GID,
+  CONTAINER_MODE,
+  CONTAINER_DAEMON_POLL_MS,
   GROUPS_DIR,
   DATA_DIR,
   MODEL_CONFIG_PATH,
@@ -45,6 +47,22 @@ export interface ContainerInput {
   chatJid: string;
   isMain: boolean;
   isScheduledTask?: boolean;
+  userId?: string;
+  userName?: string;
+  memoryRecall?: string[];
+  userProfile?: string | null;
+  memoryStats?: {
+    total: number;
+    user: number;
+    group: number;
+    global: number;
+  };
+  behaviorConfig?: Record<string, unknown>;
+  toolPolicy?: Record<string, unknown>;
+  modelOverride?: string;
+  modelContextTokens?: number;
+  modelMaxOutputTokens?: number;
+  modelTemperature?: number;
 }
 
 export interface ContainerOutput {
@@ -156,8 +174,16 @@ function buildVolumeMounts(group: RegisteredGroup, isMain: boolean): VolumeMount
   const groupIpcDir = path.join(DATA_DIR, 'ipc', group.folder);
   const messagesDir = path.join(groupIpcDir, 'messages');
   const tasksDir = path.join(groupIpcDir, 'tasks');
+  const requestsDir = path.join(groupIpcDir, 'requests');
+  const responsesDir = path.join(groupIpcDir, 'responses');
+  const agentRequestsDir = path.join(groupIpcDir, 'agent_requests');
+  const agentResponsesDir = path.join(groupIpcDir, 'agent_responses');
   fs.mkdirSync(messagesDir, { recursive: true });
   fs.mkdirSync(tasksDir, { recursive: true });
+  fs.mkdirSync(requestsDir, { recursive: true });
+  fs.mkdirSync(responsesDir, { recursive: true });
+  fs.mkdirSync(agentRequestsDir, { recursive: true });
+  fs.mkdirSync(agentResponsesDir, { recursive: true });
   // Ensure container user can write to IPC directories on Linux
   // On macOS/Docker Desktop this is handled by file sharing, but on native Linux
   // the container user needs explicit write permission to the mounted volume
@@ -166,6 +192,10 @@ function buildVolumeMounts(group: RegisteredGroup, isMain: boolean): VolumeMount
     fs.chmodSync(groupIpcDir, 0o770);
     fs.chmodSync(messagesDir, 0o770);
     fs.chmodSync(tasksDir, 0o770);
+    fs.chmodSync(requestsDir, 0o770);
+    fs.chmodSync(responsesDir, 0o770);
+    fs.chmodSync(agentRequestsDir, 0o770);
+    fs.chmodSync(agentResponsesDir, 0o770);
   } catch {
     // Permissions may already be correct, or user needs to fix ownership manually
     logger.warn({ path: groupIpcDir }, 'Could not chmod IPC directories - run: sudo chown -R $USER data/');
@@ -308,6 +338,114 @@ function buildContainerArgs(mounts: VolumeMount[], cidFile?: string): string[] {
   return args;
 }
 
+function buildDaemonArgs(mounts: VolumeMount[], containerName: string, groupFolder: string): string[] {
+  const args: string[] = ['run', '-d', '--rm', '--name', containerName, '--label', `dotclaw.group=${groupFolder}`];
+
+  // Security hardening
+  args.push('--cap-drop=ALL');
+  args.push('--security-opt=no-new-privileges');
+  args.push(`--pids-limit=${CONTAINER_PIDS_LIMIT}`);
+
+  const runUid = CONTAINER_RUN_UID ? CONTAINER_RUN_UID.trim() : '';
+  const runGid = CONTAINER_RUN_GID ? CONTAINER_RUN_GID.trim() : '';
+  if (runUid) {
+    args.push('--user', runGid ? `${runUid}:${runGid}` : runUid);
+  }
+  args.push('--env', 'HOME=/tmp');
+  args.push('--env', 'DOTCLAW_DAEMON=1');
+  args.push('--env', `DOTCLAW_DAEMON_POLL_MS=${CONTAINER_DAEMON_POLL_MS}`);
+
+  if (CONTAINER_MEMORY) {
+    args.push(`--memory=${CONTAINER_MEMORY}`);
+  }
+  if (CONTAINER_CPUS) {
+    args.push(`--cpus=${CONTAINER_CPUS}`);
+  }
+  if (CONTAINER_READONLY_ROOT) {
+    args.push('--read-only');
+    const tmpfsOptions = ['rw', 'noexec', 'nosuid', `size=${CONTAINER_TMPFS_SIZE}`];
+    if (runUid) tmpfsOptions.push(`uid=${runUid}`);
+    if (runGid) tmpfsOptions.push(`gid=${runGid}`);
+    args.push('--tmpfs', `/tmp:${tmpfsOptions.join(',')}`);
+    args.push('--tmpfs', `/home/node:${tmpfsOptions.join(',')}`);
+  }
+
+  for (const mount of mounts) {
+    if (mount.readonly) {
+      args.push('-v', `${mount.hostPath}:${mount.containerPath}:ro`);
+    } else {
+      args.push('-v', `${mount.hostPath}:${mount.containerPath}`);
+    }
+  }
+
+  args.push(CONTAINER_IMAGE);
+  return args;
+}
+
+function getDaemonContainerName(groupFolder: string): string {
+  return `dotclaw-agent-${groupFolder}`;
+}
+
+function isContainerRunning(name: string): boolean {
+  try {
+    const output = execSync(`docker ps --filter "name=${name}" --format "{{.ID}}"`, { stdio: 'pipe' })
+      .toString()
+      .trim();
+    return output.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+function ensureDaemonContainer(mounts: VolumeMount[], groupFolder: string): void {
+  const containerName = getDaemonContainerName(groupFolder);
+  if (isContainerRunning(containerName)) return;
+
+  try {
+    execSync(`docker rm -f ${containerName}`, { stdio: 'ignore' });
+  } catch {
+    // ignore if container doesn't exist
+  }
+
+  const args = buildDaemonArgs(mounts, containerName, groupFolder);
+  const result = spawnSync('docker', args, { stdio: 'ignore' });
+  if (result.status !== 0) {
+    logger.error({ groupFolder, status: result.status }, 'Failed to start daemon container');
+    throw new Error(`Failed to start daemon container for ${groupFolder}`);
+  }
+}
+
+function writeAgentRequest(groupFolder: string, payload: object): { id: string; requestPath: string; responsePath: string } {
+  const id = `agent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const requestsDir = path.join(DATA_DIR, 'ipc', groupFolder, 'agent_requests');
+  const responsesDir = path.join(DATA_DIR, 'ipc', groupFolder, 'agent_responses');
+  fs.mkdirSync(requestsDir, { recursive: true });
+  fs.mkdirSync(responsesDir, { recursive: true });
+  const requestPath = path.join(requestsDir, `${id}.json`);
+  const responsePath = path.join(responsesDir, `${id}.json`);
+  const tempPath = `${requestPath}.tmp`;
+  fs.writeFileSync(tempPath, JSON.stringify({ id, input: payload }, null, 2));
+  fs.renameSync(tempPath, requestPath);
+  return { id, requestPath, responsePath };
+}
+
+async function waitForAgentResponse(responsePath: string, timeoutMs: number): Promise<ContainerOutput> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (fs.existsSync(responsePath)) {
+      const raw = fs.readFileSync(responsePath, 'utf-8');
+      fs.unlinkSync(responsePath);
+      try {
+        return JSON.parse(raw) as ContainerOutput;
+      } catch (err) {
+        throw new Error(`Failed to parse daemon response: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    await new Promise(resolve => setTimeout(resolve, CONTAINER_DAEMON_POLL_MS));
+  }
+  throw new Error(`Daemon response timeout after ${timeoutMs}ms`);
+}
+
 function readContainerId(cidFile: string): string | null {
   try {
     const id = fs.readFileSync(cidFile, 'utf-8').trim();
@@ -327,6 +465,10 @@ export async function runContainerAgent(
   group: RegisteredGroup,
   input: ContainerInput
 ): Promise<ContainerOutput> {
+  if (CONTAINER_MODE === 'daemon') {
+    return runContainerAgentDaemon(group, input);
+  }
+
   const startTime = Date.now();
 
   const groupDir = path.join(GROUPS_DIR, group.folder);
@@ -557,6 +699,48 @@ export async function runContainerAgent(
   });
 }
 
+async function runContainerAgentDaemon(
+  group: RegisteredGroup,
+  input: ContainerInput
+): Promise<ContainerOutput> {
+  const startTime = Date.now();
+  const groupDir = path.join(GROUPS_DIR, group.folder);
+  fs.mkdirSync(groupDir, { recursive: true });
+
+  const mounts = buildVolumeMounts(group, input.isMain);
+  ensureDaemonContainer(mounts, group.folder);
+
+  const { responsePath, requestPath } = writeAgentRequest(group.folder, input);
+  const timeoutMs = group.containerConfig?.timeout || CONTAINER_TIMEOUT;
+
+  try {
+    const output = await waitForAgentResponse(responsePath, timeoutMs);
+    return {
+      ...output,
+      latency_ms: output.latency_ms ?? (Date.now() - startTime)
+    };
+  } catch (err) {
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    logger.error({ group: group.name, error: errorMessage }, 'Daemon agent error');
+    try {
+      if (fs.existsSync(requestPath)) fs.unlinkSync(requestPath);
+    } catch {
+      // ignore cleanup failure
+    }
+    try {
+      const containerName = getDaemonContainerName(group.folder);
+      spawn('docker', ['rm', '-f', containerName], { stdio: 'ignore' });
+    } catch {
+      // ignore cleanup failure
+    }
+    return {
+      status: 'error',
+      result: null,
+      error: errorMessage
+    };
+  }
+}
+
 export function writeTasksSnapshot(
   groupFolder: string,
   isMain: boolean,
@@ -598,8 +782,7 @@ export interface AvailableGroup {
 export function writeGroupsSnapshot(
   groupFolder: string,
   isMain: boolean,
-  groups: AvailableGroup[],
-  registeredJids: Set<string>
+  groups: AvailableGroup[]
 ): void {
   const groupIpcDir = path.join(DATA_DIR, 'ipc', groupFolder);
   fs.mkdirSync(groupIpcDir, { recursive: true });

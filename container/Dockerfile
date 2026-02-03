@@ -48,11 +48,11 @@ COPY agent-runner/ ./
 RUN npm run build
 
 # Create workspace directories
-RUN mkdir -p /workspace/group /workspace/global /workspace/extra /workspace/ipc/messages /workspace/ipc/tasks
+RUN mkdir -p /workspace/group /workspace/global /workspace/extra /workspace/ipc/messages /workspace/ipc/tasks /workspace/ipc/requests /workspace/ipc/responses /workspace/ipc/agent_requests /workspace/ipc/agent_responses
 
 # Create entrypoint script
 # Sources env from mounted /workspace/env-dir/env if it exists
-RUN printf '#!/bin/bash\nset -e\n[ -f /workspace/env-dir/env ] && export $(cat /workspace/env-dir/env | xargs)\ncat > /tmp/input.json\nnode /app/dist/index.js < /tmp/input.json\n' > /app/entrypoint.sh && chmod +x /app/entrypoint.sh
+RUN printf '#!/bin/bash\nset -e\n[ -f /workspace/env-dir/env ] && export $(cat /workspace/env-dir/env | xargs)\nif [ \"${DOTCLAW_DAEMON}\" = \"1\" ]; then\n  node /app/dist/daemon.js\nelse\n  cat > /tmp/input.json\n  node /app/dist/index.js < /tmp/input.json\nfi\n' > /app/entrypoint.sh && chmod +x /app/entrypoint.sh
 
 # Set ownership to node user (non-root) for writable directories
 RUN chown -R node:node /workspace

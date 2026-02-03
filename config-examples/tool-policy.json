@@ -1,0 +1,44 @@
+{
+  "default": {
+    "allow": [
+      "Read",
+      "Write",
+      "Edit",
+      "Glob",
+      "Grep",
+      "WebSearch",
+      "WebFetch",
+      "Bash",
+      "mcp__dotclaw__send_message",
+      "mcp__dotclaw__schedule_task",
+      "mcp__dotclaw__list_tasks",
+      "mcp__dotclaw__pause_task",
+      "mcp__dotclaw__resume_task",
+      "mcp__dotclaw__cancel_task",
+      "mcp__dotclaw__register_group",
+      "mcp__dotclaw__set_model",
+      "mcp__dotclaw__memory_upsert",
+      "mcp__dotclaw__memory_forget",
+      "mcp__dotclaw__memory_list",
+      "mcp__dotclaw__memory_search",
+      "mcp__dotclaw__memory_stats"
+    ],
+    "deny": [],
+    "max_per_run": {
+      "Bash": 4,
+      "WebSearch": 5,
+      "WebFetch": 6
+    },
+    "default_max_per_run": 12
+  },
+  "groups": {
+    "main": {
+      "allow": ["Bash", "WebSearch", "WebFetch"]
+    }
+  },
+  "users": {
+    "123456789": {
+      "deny": ["Bash"]
+    }
+  }
+}

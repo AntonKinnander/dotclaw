@@ -123,11 +123,14 @@ async function main() {
     ? allowlistInput.split(',').map(item => item.trim()).filter(Boolean)
     : (Array.isArray(modelConfig.allowlist) ? modelConfig.allowlist : []);
 
-  fs.writeFileSync(MODEL_CONFIG_PATH, JSON.stringify({
+  const nextModelConfig = {
+    ...modelConfig,
     model: openrouterModel,
     allowlist,
     updated_at: new Date().toISOString()
-  }, null, 2) + '\n');
+  };
+
+  fs.writeFileSync(MODEL_CONFIG_PATH, JSON.stringify(nextModelConfig, null, 2) + '\n');
 
   console.log('Configuration updated.');
 }
