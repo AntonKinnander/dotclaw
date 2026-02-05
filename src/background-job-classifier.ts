@@ -1,5 +1,7 @@
 import { loadRuntimeConfig } from './runtime-config.js';
 import type { NewMessage } from './types.js';
+import { extractJson } from './json-helpers.js';
+import { recordClassifierThreshold } from './metrics.js';
 
 type ClassifierDecision = {
   background: boolean;
@@ -12,8 +14,10 @@ export type BackgroundJobClassifierResult = {
   shouldBackground: boolean;
   confidence: number;
   reason?: string;
+  estimatedMinutes?: number;
   latencyMs?: number;
   model?: string;
+  threshold?: number;
   error?: string;
 };
 
@@ -25,18 +29,6 @@ const CLASSIFIER_SYSTEM_PROMPT = [
   'Background=false for quick answers, short clarifications, or simple tasks.',
   'Keep reason short.'
 ].join('\n');
-
-function extractJson(text: string): string | null {
-  const trimmed = text.trim();
-  if (!trimmed) return null;
-  if (trimmed.startsWith('{') && trimmed.endsWith('}')) return trimmed;
-  const start = trimmed.indexOf('{');
-  const end = trimmed.lastIndexOf('}');
-  if (start >= 0 && end > start) {
-    return trimmed.slice(start, end + 1);
-  }
-  return null;
-}
 
 function buildClassifierPayload(params: {
   lastMessage: NewMessage;
@@ -110,17 +102,58 @@ async function callClassifier(params: {
   }
 }
 
+function clamp(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) return min;
+  return Math.min(max, Math.max(min, value));
+}
+
+function resolveClassifierThreshold(params: {
+  base: number;
+  adaptive?: {
+    enabled: boolean;
+    minThreshold: number;
+    maxThreshold: number;
+    queueDepthLow: number;
+    queueDepthHigh: number;
+  };
+  queueDepth?: number;
+}): number {
+  const base = clamp(params.base, 0, 1);
+  const adaptive = params.adaptive;
+  const queueDepth = Number.isFinite(params.queueDepth) ? Number(params.queueDepth) : null;
+  if (!adaptive?.enabled || queueDepth === null) return base;
+  const min = clamp(adaptive.minThreshold, 0, 1);
+  const max = clamp(adaptive.maxThreshold, 0, 1);
+  const low = Math.max(0, Math.floor(adaptive.queueDepthLow));
+  const high = Math.max(low + 1, Math.floor(adaptive.queueDepthHigh));
+  if (queueDepth <= low) return Math.min(min, max);
+  if (queueDepth >= high) return Math.max(min, max);
+  const ratio = (queueDepth - low) / (high - low);
+  const lower = Math.min(min, max);
+  const upper = Math.max(min, max);
+  return clamp(lower + (upper - lower) * ratio, 0, 1);
+}
+
 export async function classifyBackgroundJob(params: {
   lastMessage: NewMessage;
   recentMessages: NewMessage[];
   isGroup: boolean;
   chatType: string;
+  queueDepth?: number;
+  metricsSource?: 'telegram' | 'scheduler';
 }): Promise<BackgroundJobClassifierResult> {
   const runtime = loadRuntimeConfig();
   const classifierConfig = runtime.host.backgroundJobs.autoSpawn.classifier;
   if (!classifierConfig.enabled) {
     return { shouldBackground: false, confidence: 0 };
   }
+
+  const threshold = resolveClassifierThreshold({
+    base: classifierConfig.confidenceThreshold,
+    adaptive: classifierConfig.adaptive,
+    queueDepth: params.queueDepth
+  });
+  recordClassifierThreshold(params.metricsSource ?? 'telegram', threshold);
 
   const apiKey = process.env.OPENROUTER_API_KEY;
   if (!apiKey) {
@@ -149,13 +182,15 @@ export async function classifyBackgroundJob(params: {
 
     const parsed = JSON.parse(jsonText) as ClassifierDecision;
     const confidence = Number.isFinite(parsed.confidence) ? Number(parsed.confidence) : 0;
-    const shouldBackground = parsed.background === true && confidence >= classifierConfig.confidenceThreshold;
+    const shouldBackground = parsed.background === true && confidence >= threshold;
     return {
       shouldBackground,
       confidence,
       reason: typeof parsed.reason === 'string' ? parsed.reason : undefined,
+      estimatedMinutes: Number.isFinite(parsed.estimated_minutes) ? Number(parsed.estimated_minutes) : undefined,
       latencyMs,
-      model
+      model,
+      threshold
     };
   } catch (err) {
     return {

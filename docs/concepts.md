@@ -39,3 +39,11 @@ The task scheduler runs cron-based or one-off tasks and executes them in the tar
 ## Background jobs
 
 Background jobs run long-lived work asynchronously and report back when finished. Jobs are durable and tracked in the database. Large outputs are written to `~/.dotclaw/groups/<group>/jobs/<job_id>/` and summarized in chat.
+
+## Progress and planning
+
+For long-running requests, DotClaw sends staged progress updates (planning, searching, coding, drafting, finalizing). When a lightweight planner probe detects multi-step work, progress updates and background job acknowledgements can include a short preview of the planned steps.
+
+## Canceling requests
+
+If a request is taking too long, you can send `cancel`, `stop`, or `abort` in the same chat to cancel the active foreground run.

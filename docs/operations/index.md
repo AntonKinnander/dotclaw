@@ -40,6 +40,27 @@ Or use the CLI to follow logs:
 dotclaw logs --follow
 ```
 
+## Multiple instances
+
+To create a second isolated instance on the same machine:
+
+```bash
+dotclaw add-instance dev
+```
+
+Target a specific instance or all instances:
+
+```bash
+dotclaw status --id dev
+dotclaw restart --all
+```
+
+List available instances:
+
+```bash
+dotclaw instances
+```
+
 ## Metrics
 
 Prometheus metrics are exposed at:

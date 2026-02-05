@@ -318,6 +318,7 @@ function buildSystemInstructions(params: {
   taskId?: string;
   isBackgroundJob: boolean;
   jobId?: string;
+  timezone?: string;
   planBlock?: string;
   taskExtractionPack?: PromptPack | null;
   responseQualityPack?: PromptPack | null;
@@ -425,6 +426,10 @@ function buildSystemInstructions(params: {
     ? `Behavior overrides:\n${JSON.stringify(params.behaviorConfig, null, 2)}`
     : '';
 
+  const timezoneNote = params.timezone
+    ? `Timezone: ${params.timezone}. Use this timezone when interpreting or presenting timestamps unless the user specifies another.`
+    : '';
+
   const scheduledNote = params.isScheduledTask
     ? `You are running as a scheduled task${params.taskId ? ` (task id: ${params.taskId})` : ''}. If you need to communicate, use \`mcp__dotclaw__send_message\`.`
     : '';
@@ -432,7 +437,7 @@ function buildSystemInstructions(params: {
     ? 'You are running in the background for a user request. Focus on completing the task and return a complete response without asking follow-up questions unless strictly necessary.'
     : '';
   const jobNote = params.isBackgroundJob
-    ? `You are running as a background job${params.jobId ? ` (job id: ${params.jobId})` : ''}. Return a complete result. Use \`mcp__dotclaw__job_update\` for progress if needed. Prefer writing large outputs to the job artifacts directory.`
+    ? `You are running as a background job${params.jobId ? ` (job id: ${params.jobId})` : ''}. Return a complete result. If the task will take more than a few minutes, send periodic \`mcp__dotclaw__job_update\` messages with milestones or intermediate findings (roughly every ~5 minutes or after major steps). Prefer writing large outputs to the job artifacts directory.`
     : '';
   const jobArtifactsNote = params.isBackgroundJob && params.jobId
     ? `Job artifacts directory: /workspace/group/jobs/${params.jobId}`
@@ -496,6 +501,7 @@ function buildSystemInstructions(params: {
     browserAutomation,
     groupNotes,
     globalNotes,
+    timezoneNote,
     params.planBlock || '',
     toolCallingBlock,
     toolOutcomeBlock,
@@ -835,26 +841,30 @@ export async function runAgentOnce(input: ContainerInput): Promise<ContainerOutp
   const maxToolSteps = Number.isFinite(input.maxToolSteps)
     ? Math.max(1, Math.floor(input.maxToolSteps as number))
     : agent.tools.maxToolSteps;
-  const memoryExtractionEnabled = agent.memory.extraction.enabled;
+  const memoryExtractionEnabled = agent.memory.extraction.enabled && !input.disableMemoryExtraction;
   const isDaemon = process.env.DOTCLAW_DAEMON === '1';
   const memoryExtractionAsync = agent.memory.extraction.async;
   const memoryExtractionMaxMessages = agent.memory.extraction.maxMessages;
   const memoryExtractionMaxOutputTokens = agent.memory.extraction.maxOutputTokens;
   const memoryExtractScheduled = agent.memory.extractScheduled;
   const memoryArchiveSync = agent.memory.archiveSync;
-  const plannerEnabled = agent.planner.enabled;
+  const plannerEnabled = agent.planner.enabled && !input.disablePlanner;
   const plannerMode = String(agent.planner.mode || 'auto').toLowerCase();
   const plannerMinTokens = agent.planner.minTokens;
   const plannerTrigger = buildPlannerTrigger(agent.planner.triggerRegex);
   const plannerModel = agent.models.planner;
   const plannerMaxOutputTokens = agent.planner.maxOutputTokens;
   const plannerTemperature = agent.planner.temperature;
-  const responseValidateEnabled = agent.responseValidation.enabled;
+  const responseValidateEnabled = agent.responseValidation.enabled && !input.disableResponseValidation;
   const responseValidateModel = agent.models.responseValidation;
   const responseValidateMaxOutputTokens = agent.responseValidation.maxOutputTokens;
   const responseValidateTemperature = agent.responseValidation.temperature;
-  const responseValidateMaxRetries = agent.responseValidation.maxRetries;
+  const responseValidateMaxRetries = Number.isFinite(input.responseValidationMaxRetries)
+    ? Math.max(0, Math.floor(input.responseValidationMaxRetries as number))
+    : agent.responseValidation.maxRetries;
   const responseValidateAllowToolCalls = agent.responseValidation.allowToolCalls;
+  const responseValidateMinPromptTokens = agent.responseValidation.minPromptTokens || 0;
+  const responseValidateMinResponseTokens = agent.responseValidation.minResponseTokens || 0;
   const maxContextMessageTokens = agent.context.maxContextMessageTokens;
   const streamingEnabled = Boolean(input.streaming?.enabled && typeof input.streaming?.draftId === 'number');
   const streamingDraftId = streamingEnabled ? input.streaming?.draftId : undefined;
@@ -884,6 +894,7 @@ export async function runAgentOnce(input: ContainerInput): Promise<ContainerOutp
   const toolCalls: ToolCallRecord[] = [];
   let memoryItemsUpserted = 0;
   let memoryItemsExtracted = 0;
+  const timings: { planner_ms?: number; response_validation_ms?: number; memory_extraction_ms?: number; tool_ms?: number } = {};
   const ipc = createIpcHandlers({
     chatJid: input.chatJid,
     groupFolder: input.groupFolder,
@@ -897,7 +908,11 @@ export async function runAgentOnce(input: ContainerInput): Promise<ContainerOutp
     onToolCall: (call) => {
       toolCalls.push(call);
     },
-    policy: input.toolPolicy
+    policy: input.toolPolicy,
+    jobProgress: {
+      jobId: input.jobId,
+      enabled: Boolean(input.isBackgroundJob)
+    }
   });
 
   let streamLastSentAt = 0;
@@ -1083,6 +1098,7 @@ export async function runAgentOnce(input: ContainerInput): Promise<ContainerOutp
     taskId: input.taskId,
     isBackgroundJob: !!input.isBackgroundJob,
     jobId: input.jobId,
+    timezone: typeof input.timezone === 'string' ? input.timezone : undefined,
     planBlock: planBlockValue,
     taskExtractionPack: taskPackResult?.pack || null,
     responseQualityPack: responseQualityResult?.pack || null,
@@ -1109,6 +1125,7 @@ export async function runAgentOnce(input: ContainerInput): Promise<ContainerOutp
     trigger: plannerTrigger
   })) {
     try {
+      const plannerStartedAt = Date.now();
       const plannerPrompt = buildPlannerPrompt(plannerContextMessages);
       const plannerResult = await openrouter.callModel({
         model: plannerModel,
@@ -1122,6 +1139,7 @@ export async function runAgentOnce(input: ContainerInput): Promise<ContainerOutp
       if (plan) {
         planBlock = formatPlanBlock(plan);
       }
+      timings.planner_ms = Date.now() - plannerStartedAt;
     } catch (err) {
       log(`Planner failed: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -1245,6 +1263,8 @@ export async function runAgentOnce(input: ContainerInput): Promise<ContainerOutp
     modelToolCalls = firstAttempt.modelToolCalls;
 
     const shouldValidate = responseValidateEnabled
+      && promptTokens >= responseValidateMinPromptTokens
+      && completionTokens >= responseValidateMinResponseTokens
       && (responseValidateAllowToolCalls || modelToolCalls.length === 0);
     if (shouldValidate) {
       let retriesLeft = responseValidateMaxRetries;
@@ -1257,6 +1277,7 @@ export async function runAgentOnce(input: ContainerInput): Promise<ContainerOutp
           validationResult = { verdict: 'fail', issues: ['Response was empty.'], missing: [] };
         } else {
           try {
+            const validationStartedAt = Date.now();
             validationResult = await validateResponseQuality({
               openrouter,
               model: responseValidateModel,
@@ -1265,6 +1286,7 @@ export async function runAgentOnce(input: ContainerInput): Promise<ContainerOutp
               maxOutputTokens: responseValidateMaxOutputTokens,
               temperature: responseValidateTemperature
             });
+            timings.response_validation_ms = (timings.response_validation_ms ?? 0) + (Date.now() - validationStartedAt);
           } catch (err) {
             log(`Response validation failed: ${err instanceof Error ? err.message : String(err)}`);
           }
@@ -1306,6 +1328,7 @@ export async function runAgentOnce(input: ContainerInput): Promise<ContainerOutp
       session_recall_count: sessionRecallCount,
       memory_items_upserted: memoryItemsUpserted,
       memory_items_extracted: memoryItemsExtracted,
+      timings: Object.keys(timings).length > 0 ? timings : undefined,
       tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
       latency_ms: latencyMs
     };
@@ -1335,6 +1358,7 @@ export async function runAgentOnce(input: ContainerInput): Promise<ContainerOutp
   const runMemoryExtraction = async () => {
     const extractionMessages = history.slice(-memoryExtractionMaxMessages);
     if (extractionMessages.length === 0) return;
+    const extractionStartedAt = Date.now();
     const extractionPrompt = buildMemoryExtractionPrompt({
       assistantName,
       userId: input.userId,
@@ -1380,6 +1404,7 @@ export async function runAgentOnce(input: ContainerInput): Promise<ContainerOutp
       memoryItemsExtracted += normalizedItems.length;
       memoryItemsUpserted += normalizedItems.length;
     }
+    timings.memory_extraction_ms = (timings.memory_extraction_ms ?? 0) + (Date.now() - extractionStartedAt);
   };
 
   if (memoryExtractionEnabled && (!input.isScheduledTask || memoryExtractScheduled)) {
@@ -1398,6 +1423,12 @@ export async function runAgentOnce(input: ContainerInput): Promise<ContainerOutp
 
   // Normalize empty/whitespace-only responses to null
   const finalResult = responseText && responseText.trim() ? responseText : null;
+  if (toolCalls.length > 0) {
+    const totalToolMs = toolCalls.reduce((sum, call) => sum + (call.duration_ms || 0), 0);
+    if (totalToolMs > 0) {
+      timings.tool_ms = totalToolMs;
+    }
+  }
 
   return {
     status: 'success',
@@ -1413,6 +1444,7 @@ export async function runAgentOnce(input: ContainerInput): Promise<ContainerOutp
     session_recall_count: sessionRecallCount,
     memory_items_upserted: memoryItemsUpserted,
     memory_items_extracted: memoryItemsExtracted,
+    timings: Object.keys(timings).length > 0 ? timings : undefined,
     tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
     latency_ms: latencyMs
   };

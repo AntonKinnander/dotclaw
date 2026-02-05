@@ -1,13 +1,13 @@
 import { buildAgentContext, AgentContext } from './agent-context.js';
 import { runContainerAgent, writeTasksSnapshot, writeGroupsSnapshot } from './container-runner.js';
 import { getAllTasks, setGroupSession, logToolCalls } from './db.js';
-import { MAIN_GROUP_FOLDER } from './config.js';
+import { MAIN_GROUP_FOLDER, TIMEZONE } from './config.js';
 import { runWithAgentSemaphore } from './agent-semaphore.js';
 import { withGroupLock } from './locks.js';
 import { getModelPricing } from './model-registry.js';
 import { computeCostUSD } from './cost.js';
 import { writeTrace } from './trace-writer.js';
-import { recordLatency, recordTokenUsage, recordCost, recordMemoryRecall, recordMemoryUpsert, recordMemoryExtract, recordToolCall, recordError } from './metrics.js';
+import { recordLatency, recordTokenUsage, recordCost, recordMemoryRecall, recordMemoryUpsert, recordMemoryExtract, recordToolCall, recordError, recordStageLatency } from './metrics.js';
 import type { ContainerOutput } from './container-protocol.js';
 import type { RegisteredGroup } from './types.js';
 
@@ -78,6 +78,7 @@ export async function executeAgentRun(params: {
   toolAllow?: string[];
   toolDeny?: string[];
   modelOverride?: string;
+  modelMaxOutputTokens?: number;
   sessionId?: string;
   persistSession?: boolean;
   onSessionUpdate?: (sessionId: string) => void;
@@ -89,6 +90,10 @@ export async function executeAgentRun(params: {
   taskId?: string;
   jobId?: string;
   isBackgroundJob?: boolean;
+  disablePlanner?: boolean;
+  disableResponseValidation?: boolean;
+  responseValidationMaxRetries?: number;
+  disableMemoryExtraction?: boolean;
   streaming?: {
     enabled: boolean;
     draftId: number;
@@ -117,8 +122,13 @@ export async function executeAgentRun(params: {
     recallMaxResults: params.recallMaxResults,
     recallMaxTokens: params.recallMaxTokens,
     toolAllow: params.toolAllow,
-    toolDeny: params.toolDeny
+    toolDeny: params.toolDeny,
+    recallEnabled: params.recallMaxResults > 0 && params.recallMaxTokens > 0
   });
+
+  const resolvedMaxOutputTokens = [params.modelMaxOutputTokens, context.resolvedModel.override?.max_output_tokens]
+    .filter((value): value is number => Number.isFinite(value))
+    .reduce((min, value) => Math.min(min, value), Infinity);
 
   const runContainer = () => runContainerAgent(group, {
     prompt: params.prompt,
@@ -141,9 +151,14 @@ export async function executeAgentRun(params: {
     behaviorConfig: context.behaviorConfig as Record<string, unknown>,
     toolPolicy: context.toolPolicy as Record<string, unknown>,
     modelOverride: params.modelOverride || context.resolvedModel.model,
+    modelMaxOutputTokens: Number.isFinite(resolvedMaxOutputTokens) ? resolvedMaxOutputTokens : undefined,
     modelContextTokens: context.resolvedModel.override?.context_window,
-    modelMaxOutputTokens: context.resolvedModel.override?.max_output_tokens,
     modelTemperature: context.resolvedModel.override?.temperature,
+    timezone: TIMEZONE,
+    disablePlanner: params.disablePlanner,
+    disableResponseValidation: params.disableResponseValidation,
+    responseValidationMaxRetries: params.responseValidationMaxRetries,
+    disableMemoryExtraction: params.disableMemoryExtraction,
     streaming: params.streaming,
     maxToolSteps: params.maxToolSteps
   }, { abortSignal: params.abortSignal, timeoutMs: params.timeoutMs });
@@ -175,12 +190,29 @@ export function recordAgentTelemetry(params: {
   toolAuditSource: 'message' | 'background' | 'scheduler' | 'heartbeat';
   errorMessage?: string;
   errorType?: string;
+  extraTimings?: Record<string, number>;
 }): void {
   const { traceBase, output, context } = params;
+  const stageSource = params.metricsSource
+    ? params.metricsSource
+    : (params.toolAuditSource === 'background' ? 'background' : 'telegram');
   const pricing = output?.model
     ? getModelPricing(context.modelRegistry, output.model)
     : context.modelPricing;
   const cost = computeCostUSD(output?.tokens_prompt, output?.tokens_completion, pricing);
+
+  const timingBundle: Record<string, number> = {};
+  if (context.timings?.context_build_ms) timingBundle.context_build_ms = context.timings.context_build_ms;
+  if (context.timings?.memory_recall_ms) timingBundle.memory_recall_ms = context.timings.memory_recall_ms;
+  if (output?.timings?.planner_ms) timingBundle.planner_ms = output.timings.planner_ms;
+  if (output?.timings?.response_validation_ms) timingBundle.response_validation_ms = output.timings.response_validation_ms;
+  if (output?.timings?.memory_extraction_ms) timingBundle.memory_extraction_ms = output.timings.memory_extraction_ms;
+  if (output?.timings?.tool_ms) timingBundle.tool_ms = output.timings.tool_ms;
+  if (params.extraTimings) {
+    for (const [key, value] of Object.entries(params.extraTimings)) {
+      if (Number.isFinite(value)) timingBundle[key] = Number(value);
+    }
+  }
 
   writeTrace({
     ...traceBase,
@@ -201,8 +233,34 @@ export function recordAgentTelemetry(params: {
     session_recall_count: output?.session_recall_count,
     memory_items_upserted: output?.memory_items_upserted,
     memory_items_extracted: output?.memory_items_extracted,
+    timings: Object.keys(timingBundle).length > 0 ? timingBundle : undefined,
     error_code: params.errorMessage || (output?.status === 'error' ? output?.error : undefined)
   });
+
+  if (context.timings?.context_build_ms) {
+    recordStageLatency('context_build', context.timings.context_build_ms, stageSource);
+  }
+  if (context.timings?.memory_recall_ms) {
+    recordStageLatency('memory_recall', context.timings.memory_recall_ms, stageSource);
+  }
+  if (output?.timings?.planner_ms) {
+    recordStageLatency('planner', output.timings.planner_ms, stageSource);
+  }
+  if (output?.timings?.response_validation_ms) {
+    recordStageLatency('response_validation', output.timings.response_validation_ms, stageSource);
+  }
+  if (output?.timings?.memory_extraction_ms) {
+    recordStageLatency('memory_extraction', output.timings.memory_extraction_ms, stageSource);
+  }
+  if (output?.timings?.tool_ms) {
+    recordStageLatency('tools', output.timings.tool_ms, stageSource);
+  }
+  if (params.extraTimings) {
+    for (const [key, value] of Object.entries(params.extraTimings)) {
+      if (!Number.isFinite(value)) continue;
+      recordStageLatency(key, Number(value), stageSource);
+    }
+  }
 
   if (params.errorMessage || output?.status === 'error') {
     if (params.errorType) {

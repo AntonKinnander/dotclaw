@@ -4,6 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import { spawn, spawnSync, execSync } from 'child_process';
 import readline from 'readline';
+import net from 'net';
 
 import {
   DOTCLAW_HOME,
@@ -11,6 +12,7 @@ import {
   GROUPS_DIR,
   LOGS_DIR,
   ENV_PATH,
+  RUNTIME_CONFIG_PATH,
   REGISTERED_GROUPS_PATH,
   CONTAINER_BUILD_SCRIPT,
   SCRIPTS_DIR,
@@ -21,7 +23,13 @@ const PLATFORM = process.platform;
 const IS_MACOS = PLATFORM === 'darwin';
 const IS_LINUX = PLATFORM === 'linux';
 
-const LAUNCHD_PLIST_NAME = 'com.dotclaw.plist';
+const INSTANCE_ID_RAW = process.env.DOTCLAW_INSTANCE_ID || '';
+const INSTANCE_ID = INSTANCE_ID_RAW.trim()
+  ? INSTANCE_ID_RAW.trim().replace(/[^a-zA-Z0-9_.-]+/g, '-').replace(/^-+|-+$/g, '')
+  : '';
+const LAUNCHD_LABEL_BASE = 'com.dotclaw';
+const LAUNCHD_LABEL = INSTANCE_ID ? `${LAUNCHD_LABEL_BASE}.${INSTANCE_ID}` : LAUNCHD_LABEL_BASE;
+const LAUNCHD_PLIST_NAME = `${LAUNCHD_LABEL}.plist`;
 const SYSTEMD_SERVICE_NAME = 'dotclaw.service';
 
 function log(message: string): void {
@@ -34,6 +42,186 @@ function error(message: string): void {
 
 function warn(message: string): void {
   console.warn(`[dotclaw] WARN: ${message}`);
+}
+
+function getInstanceIdLabel(id: string): string {
+  const normalized = id.trim().replace(/[^a-zA-Z0-9_.-]+/g, '-').replace(/^-+|-+$/g, '');
+  if (!normalized) return LAUNCHD_LABEL_BASE;
+  return `${LAUNCHD_LABEL_BASE}.${normalized}`;
+}
+
+function normalizeInstanceId(id: string): string {
+  return id.trim().replace(/[^a-zA-Z0-9_.-]+/g, '-').replace(/^-+|-+$/g, '');
+}
+
+function getInstanceHome(id: string): string {
+  const normalized = normalizeInstanceId(id);
+  if (!normalized || normalized === 'default') {
+    return path.join(getUserHome(), '.dotclaw');
+  }
+  return path.join(getUserHome(), `.dotclaw-${normalized}`);
+}
+
+function listInstanceTargets(): Array<{ id: string; home: string }> {
+  const targets = new Map<string, { id: string; home: string }>();
+  const defaultHome = DOTCLAW_HOME;
+  const defaultId = INSTANCE_ID || 'default';
+  targets.set(defaultHome, { id: defaultId, home: defaultHome });
+
+  const homeDir = getUserHome();
+  try {
+    const entries = fs.readdirSync(homeDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      if (!entry.name.startsWith('.dotclaw-')) continue;
+      const id = entry.name.slice('.dotclaw-'.length);
+      const home = path.join(homeDir, entry.name);
+      if (!targets.has(home)) {
+        targets.set(home, { id, home });
+      }
+    }
+  } catch {
+    // ignore read errors
+  }
+
+  return Array.from(targets.values()).sort((a, b) => {
+    if (a.id === 'default') return -1;
+    if (b.id === 'default') return 1;
+    return a.id.localeCompare(b.id);
+  });
+}
+
+type ParsedCliArgs = {
+  command: string;
+  args: string[];
+  passthrough: string[];
+  flags: {
+    id?: string;
+    all: boolean;
+    follow: boolean;
+    foreground: boolean;
+  };
+};
+
+function parseCliArgs(argv: string[]): ParsedCliArgs {
+  let command = '';
+  const args: string[] = [];
+  const passthrough: string[] = [];
+  let id: string | undefined;
+  let all = false;
+  let sawFollow = false;
+  let sawForeground = false;
+  let sawShortF = false;
+
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === '--all') {
+      all = true;
+      continue;
+    }
+    if (arg.startsWith('--id=')) {
+      id = arg.slice('--id='.length);
+      continue;
+    }
+    if (arg === '--id') {
+      id = argv[i + 1];
+      i += 1;
+      continue;
+    }
+    if (arg === '--follow') {
+      sawFollow = true;
+    }
+    if (arg === '--foreground') {
+      sawForeground = true;
+    }
+    if (arg === '-f') {
+      sawShortF = true;
+    }
+
+    if (!command && !arg.startsWith('-')) {
+      command = arg;
+      continue;
+    }
+
+    if (arg.startsWith('-')) {
+      passthrough.push(arg);
+      continue;
+    }
+
+    args.push(arg);
+  }
+
+  const resolvedCommand = command || 'help';
+  const follow = resolvedCommand === 'logs' ? (sawFollow || sawShortF) : sawFollow;
+  const foreground = resolvedCommand === 'start' ? (sawForeground || sawShortF) : sawForeground;
+
+  return {
+    command: resolvedCommand,
+    args,
+    passthrough,
+    flags: {
+      id,
+      all,
+      follow,
+      foreground
+    }
+  };
+}
+
+function buildChildArgs(command: string, parsed: ParsedCliArgs): string[] {
+  return [command, ...parsed.passthrough, ...parsed.args].filter(Boolean);
+}
+
+function runCliWithEnv(command: string, parsed: ParsedCliArgs, env: NodeJS.ProcessEnv): number {
+  const cliPath = path.join(PACKAGE_ROOT, 'dist', 'cli.js');
+  if (!fs.existsSync(cliPath)) {
+    error(`DotClaw not properly installed. Missing: ${cliPath}`);
+    return 1;
+  }
+  const childArgs = buildChildArgs(command, parsed);
+  const result = spawnSync(getNodePath(), [cliPath, ...childArgs], { stdio: 'inherit', env });
+  return result.status || 0;
+}
+
+function ensureDirectoryStructureAt(dotclawHome: string): void {
+  const dirs = [
+    dotclawHome,
+    path.join(dotclawHome, 'config'),
+    path.join(dotclawHome, 'data'),
+    path.join(dotclawHome, 'data', 'store'),
+    path.join(dotclawHome, 'data', 'ipc'),
+    path.join(dotclawHome, 'data', 'sessions'),
+    path.join(dotclawHome, 'groups'),
+    path.join(dotclawHome, 'groups', 'main'),
+    path.join(dotclawHome, 'groups', 'global'),
+    path.join(dotclawHome, 'logs'),
+    path.join(dotclawHome, 'traces'),
+    path.join(dotclawHome, 'prompts')
+  ];
+
+  for (const dir of dirs) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+}
+
+async function isPortAvailable(port: number): Promise<boolean> {
+  return await new Promise((resolve) => {
+    const server = net.createServer();
+    server.unref();
+    server.on('error', () => resolve(false));
+    server.listen(port, '127.0.0.1', () => {
+      server.close(() => resolve(true));
+    });
+  });
+}
+
+async function findAvailablePort(startPort: number, attempts = 20): Promise<number> {
+  let port = startPort;
+  for (let i = 0; i < attempts; i += 1) {
+    if (await isPortAvailable(port)) return port;
+    port += 1;
+  }
+  return startPort;
 }
 
 function getNodePath(): string {
@@ -51,8 +239,8 @@ function getLaunchdPlistPath(): string {
 function isServiceRunning(): boolean {
   if (IS_MACOS) {
     try {
-      const result = execSync(`launchctl list | grep com.dotclaw`, { encoding: 'utf-8', stdio: 'pipe' });
-      return result.includes('com.dotclaw');
+      const result = execSync(`launchctl list | grep -F "${LAUNCHD_LABEL}"`, { encoding: 'utf-8', stdio: 'pipe' });
+      return result.includes(LAUNCHD_LABEL);
     } catch {
       return false;
     }
@@ -77,7 +265,7 @@ function generateLaunchdPlist(): string {
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.dotclaw</string>
+    <string>${LAUNCHD_LABEL}</string>
     <key>ProgramArguments</key>
     <array>
         <string>${nodePath}</string>
@@ -407,6 +595,7 @@ async function cmdDoctor(): Promise<void> {
   if (IS_MACOS) {
     const plistPath = getLaunchdPlistPath();
     console.log(`launchd plist: ${fs.existsSync(plistPath) ? 'installed' : 'not installed'}`);
+    console.log(`launchd label: ${LAUNCHD_LABEL}`);
     console.log(`Service running: ${isServiceRunning() ? 'yes' : 'no'}`);
   } else if (IS_LINUX) {
     console.log(`Service running: ${isServiceRunning() ? 'yes' : 'no'}`);
@@ -508,6 +697,105 @@ async function cmdUninstallService(): Promise<void> {
   }
 }
 
+async function cmdAddInstance(instanceId: string): Promise<void> {
+  const normalized = normalizeInstanceId(instanceId);
+  if (!normalized) {
+    error('Usage: dotclaw add-instance <instance-id>');
+    process.exit(1);
+  }
+
+  const newHome = getInstanceHome(normalized);
+  const runtimePath = path.join(newHome, 'config', 'runtime.json');
+  const envPath = path.join(newHome, '.env');
+
+  if (fs.existsSync(newHome)) {
+    error(`Instance home already exists: ${newHome}`);
+    process.exit(1);
+  }
+
+  ensureDirectoryStructureAt(newHome);
+
+  if (fs.existsSync(ENV_PATH)) {
+    const copyEnv = await prompt('Copy .env from existing instance? (yes/no)', 'yes');
+    if (copyEnv.toLowerCase().startsWith('y')) {
+      fs.copyFileSync(ENV_PATH, envPath);
+      log(`Copied .env to ${envPath}`);
+    }
+  }
+
+  let runtimeConfig: Record<string, unknown> = {};
+  if (fs.existsSync(RUNTIME_CONFIG_PATH)) {
+    try {
+      runtimeConfig = JSON.parse(fs.readFileSync(RUNTIME_CONFIG_PATH, 'utf-8'));
+    } catch {
+      warn('Failed to parse existing runtime.json; starting fresh');
+    }
+  }
+
+  const host = typeof runtimeConfig.host === 'object' && runtimeConfig.host ? runtimeConfig.host as Record<string, unknown> : {};
+  const container = typeof host.container === 'object' && host.container ? host.container as Record<string, unknown> : {};
+  container.instanceId = normalized;
+  host.container = container;
+
+  const metrics = typeof host.metrics === 'object' && host.metrics ? host.metrics as Record<string, unknown> : {};
+  const metricsEnabled = metrics.enabled !== false;
+  if (metricsEnabled) {
+    const basePort = typeof metrics.port === 'number' ? metrics.port : 3001;
+    const availablePort = await findAvailablePort(basePort + 1);
+    metrics.port = availablePort;
+  }
+  host.metrics = metrics;
+  runtimeConfig.host = host;
+
+  fs.mkdirSync(path.dirname(runtimePath), { recursive: true });
+  fs.writeFileSync(runtimePath, JSON.stringify(runtimeConfig, null, 2));
+  log(`Wrote runtime config: ${runtimePath}`);
+
+  if (process.env.DOTCLAW_TEST_MODE === '1') {
+    log('Test mode enabled: skipping service install/start');
+    return;
+  }
+
+  const cliPath = path.join(PACKAGE_ROOT, 'dist', 'cli.js');
+  if (!fs.existsSync(cliPath)) {
+    error(`DotClaw not properly installed. Missing: ${cliPath}`);
+    process.exit(1);
+  }
+
+  const env = { ...process.env, DOTCLAW_HOME: newHome, DOTCLAW_INSTANCE_ID: normalized };
+  const launchdLabel = getInstanceIdLabel(normalized);
+
+  if (IS_MACOS) {
+    try {
+      const existing = execSync(`launchctl list | grep -F "${launchdLabel}"`, { encoding: 'utf-8', stdio: 'pipe' });
+      if (existing.includes(launchdLabel)) {
+        error(`launchd service already exists for ${launchdLabel}`);
+        process.exit(1);
+      }
+    } catch {
+      // not running, ok
+    }
+  }
+
+  log(`Installing service for instance "${normalized}"...`);
+  const installResult = spawnSync(getNodePath(), [cliPath, 'install-service'], { stdio: 'inherit', env });
+  if (installResult.status !== 0) {
+    process.exit(installResult.status || 1);
+  }
+
+  log(`Starting instance "${normalized}"...`);
+  const startResult = spawnSync(getNodePath(), [cliPath, 'start'], { stdio: 'inherit', env });
+  if (startResult.status !== 0) {
+    process.exit(startResult.status || 1);
+  }
+
+  log(`Instance "${normalized}" started at ${newHome}`);
+  log(`Launchd label: ${launchdLabel}`);
+  if (fs.existsSync(envPath)) {
+    log(`If you want a different Telegram bot, edit: ${envPath}`);
+  }
+}
+
 async function cmdRegister(): Promise<void> {
   // Ensure directories exist
   ensureDirectoryStructure();
@@ -568,6 +856,7 @@ async function cmdRegister(): Promise<void> {
 async function cmdStatus(): Promise<void> {
   console.log(`Platform: ${PLATFORM}`);
   console.log(`DOTCLAW_HOME: ${DOTCLAW_HOME}`);
+  console.log(`Instance ID: ${INSTANCE_ID || 'default'}`);
   console.log(`Package root: ${PACKAGE_ROOT}`);
   console.log(`Service running: ${isServiceRunning() ? 'yes' : 'no'}`);
 
@@ -586,6 +875,18 @@ async function cmdStatus(): Promise<void> {
   }
 }
 
+async function cmdInstances(): Promise<void> {
+  const instances = listInstanceTargets();
+  if (instances.length === 0) {
+    console.log('No instances found.');
+    return;
+  }
+  console.log('Instances:');
+  for (const instance of instances) {
+    console.log(`- ${instance.id}: ${instance.home}`);
+  }
+}
+
 function printHelp(): void {
   console.log(`
 DotClaw - Personal OpenRouter-based assistant
@@ -595,6 +896,8 @@ Usage: dotclaw <command> [options]
 Commands:
   setup              Run initial setup (init, configure, build, install service)
   configure          Re-run configuration (change API keys, model, etc.)
+  add-instance       Create and start a new isolated instance
+  instances          List discovered instances
   start              Start the service (or run in foreground with --foreground)
   stop               Stop the service
   restart            Restart the service
@@ -610,6 +913,8 @@ Commands:
 Options:
   --foreground, -f   Run in foreground (for 'start' command)
   --follow, -f       Follow log output (for 'logs' command)
+  --id <id>          Run command against a specific instance
+  --all              Run command against all instances (supported commands only)
 
 Data directory: ${DOTCLAW_HOME}
 Override with DOTCLAW_HOME environment variable.
@@ -617,6 +922,10 @@ Override with DOTCLAW_HOME environment variable.
 Examples:
   dotclaw setup              # First-time setup
   dotclaw configure          # Change configuration
+  dotclaw add-instance dev    # Create a new instance (~/.dotclaw-dev)
+  dotclaw instances           # List instance homes
+  dotclaw status --id dev     # Status for a specific instance
+  dotclaw restart --all       # Restart all instances
   dotclaw start              # Start as background service
   dotclaw start --foreground # Run in terminal
   dotclaw logs --follow      # Tail logs
@@ -625,14 +934,71 @@ Examples:
 }
 
 async function main(): Promise<void> {
-  const args = process.argv.slice(2);
-  const command = args[0] || 'help';
-  const flags = args.slice(1);
-
-  const hasFlag = (short: string, long: string): boolean =>
-    flags.includes(short) || flags.includes(long);
+  const parsed = parseCliArgs(process.argv.slice(2));
+  const command = parsed.command;
 
   try {
+    if ((command === 'add-instance' || command === 'instances') && (parsed.flags.id || parsed.flags.all)) {
+      error(`${command} does not support --id or --all.`);
+      process.exit(1);
+    }
+
+    if (parsed.flags.id && parsed.flags.all) {
+      error('Use either --id or --all, not both.');
+      process.exit(1);
+    }
+
+    const allSupported = new Set(['start', 'stop', 'restart', 'status', 'logs', 'doctor']);
+    if (parsed.flags.all) {
+      if (!allSupported.has(command)) {
+        error(`--all is not supported for "${command}".`);
+        process.exit(1);
+      }
+      if (command === 'logs' && parsed.flags.follow) {
+        error('--all cannot be used with logs --follow.');
+        process.exit(1);
+      }
+      if (command === 'start' && parsed.flags.foreground) {
+        error('--all cannot be used with start --foreground.');
+        process.exit(1);
+      }
+
+      const instances = listInstanceTargets();
+      let exitCode = 0;
+      for (const instance of instances) {
+        console.log(`\n=== ${instance.id} (${instance.home}) ===`);
+        const env: NodeJS.ProcessEnv = { ...process.env, DOTCLAW_HOME: instance.home };
+        if (instance.id && instance.id !== 'default') {
+          env.DOTCLAW_INSTANCE_ID = instance.id;
+        } else {
+          delete env.DOTCLAW_INSTANCE_ID;
+        }
+        const code = runCliWithEnv(command, parsed, env);
+        if (code !== 0) exitCode = code;
+      }
+      process.exit(exitCode);
+    }
+
+    if (parsed.flags.id) {
+      const normalized = normalizeInstanceId(parsed.flags.id);
+      if (!normalized) {
+        error('Invalid instance id.');
+        process.exit(1);
+      }
+      const targetHome = getInstanceHome(normalized);
+      const targetInstanceId = normalized === 'default' ? '' : normalized;
+      if (DOTCLAW_HOME !== targetHome || INSTANCE_ID !== targetInstanceId) {
+        const env: NodeJS.ProcessEnv = { ...process.env, DOTCLAW_HOME: targetHome };
+        if (targetInstanceId) {
+          env.DOTCLAW_INSTANCE_ID = targetInstanceId;
+        } else {
+          delete env.DOTCLAW_INSTANCE_ID;
+        }
+        const exitCode = runCliWithEnv(command, parsed, env);
+        process.exit(exitCode);
+      }
+    }
+
     switch (command) {
       case 'setup':
         await cmdSetup();
@@ -640,11 +1006,17 @@ async function main(): Promise<void> {
       case 'configure':
         await cmdConfigure();
         break;
+      case 'add-instance':
+        await cmdAddInstance(parsed.args[0] || '');
+        break;
+      case 'instances':
+        await cmdInstances();
+        break;
       case 'build':
         await cmdBuild();
         break;
       case 'start':
-        await cmdStart(hasFlag('-f', '--foreground'));
+        await cmdStart(parsed.flags.foreground);
         break;
       case 'stop':
         await cmdStop();
@@ -653,7 +1025,7 @@ async function main(): Promise<void> {
         await cmdRestart();
         break;
       case 'logs':
-        await cmdLogs(hasFlag('-f', '--follow'));
+        await cmdLogs(parsed.flags.follow);
         break;
       case 'doctor':
         await cmdDoctor();

@@ -39,6 +39,13 @@ type ToolRuntime = {
     tools: string[];
     timeoutMs: number;
   };
+  progress: {
+    enabled: boolean;
+    minIntervalMs: number;
+    notifyTools: string[];
+    notifyOnStart: boolean;
+    notifyOnError: boolean;
+  };
   openrouter: {
     siteUrl: string;
     siteName: string;
@@ -85,6 +92,13 @@ function buildToolRuntime(config: AgentRuntimeConfig['agent']): ToolRuntime {
       maxOutputTokens: config.tools.toolSummary.maxOutputTokens,
       tools: toolSummaryTools,
       timeoutMs: toolSummaryTimeoutMs
+    },
+    progress: {
+      enabled: config.tools.progress.enabled,
+      minIntervalMs: config.tools.progress.minIntervalMs,
+      notifyTools: config.tools.progress.notifyTools,
+      notifyOnStart: config.tools.progress.notifyOnStart,
+      notifyOnError: config.tools.progress.notifyOnError
     },
     openrouter: {
       siteUrl: config.openrouter.siteUrl,
@@ -824,12 +838,23 @@ async function maybeSummarizeToolResult<T>(name: string, result: T, runtime: Too
   return payload.apply(limited.text) as T;
 }
 
-export function createTools(ctx: IpcContext, config: AgentRuntimeConfig['agent'], options?: { onToolCall?: ToolCallLogger; policy?: ToolPolicy }) {
+export function createTools(
+  ctx: IpcContext,
+  config: AgentRuntimeConfig['agent'],
+  options?: { onToolCall?: ToolCallLogger; policy?: ToolPolicy; jobProgress?: { jobId?: string; enabled?: boolean } }
+) {
   const runtime = buildToolRuntime(config);
   const ipc = createIpcHandlers(ctx, config.ipc);
   const isMain = ctx.isMain;
   const onToolCall = options?.onToolCall;
   const policy = options?.policy;
+  const progressConfig = runtime.progress;
+  const progressJobId = options?.jobProgress?.jobId;
+  const progressEnabled = Boolean(progressJobId && progressConfig.enabled && options?.jobProgress?.enabled !== false);
+  const progressNotifyTools = new Set(
+    (progressConfig.notifyTools || []).map(item => item.trim().toLowerCase()).filter(Boolean)
+  );
+  let lastProgressNotifyAt = 0;
   const allowList = (policy?.allow || []).map(item => item.toLowerCase());
   const denyList = (policy?.deny || []).map(item => item.toLowerCase());
   const maxPerRunConfig = policy?.max_per_run || {};
@@ -849,23 +874,61 @@ export function createTools(ctx: IpcContext, config: AgentRuntimeConfig['agent']
   const webFetchAllowlist = runtime.webfetchAllowlist;
   const webFetchBlocklist = runtime.webfetchBlocklist;
 
+  const shouldNotifyTool = (name: string) => {
+    if (!progressEnabled) return false;
+    if (!progressNotifyTools || progressNotifyTools.size === 0) return false;
+    return progressNotifyTools.has(name.toLowerCase());
+  };
+
+  const sendJobUpdate = (payload: { message: string; level?: 'info' | 'progress' | 'warn' | 'error'; notify?: boolean; data?: Record<string, unknown> }) => {
+    if (!progressEnabled || !progressJobId) return;
+    void ipc.jobUpdate({
+      job_id: progressJobId,
+      message: payload.message,
+      level: payload.level,
+      notify: payload.notify,
+      data: payload.data
+    }).catch(() => undefined);
+  };
+
   const wrapExecute = <TInput, TOutput>(name: string, execute: (args: TInput) => Promise<TOutput>) => {
     return async (args: TInput): Promise<TOutput> => {
       const start = Date.now();
+      const normalizedName = name.toLowerCase();
+      const isSystemTool = normalizedName.startsWith('mcp__');
       try {
-        const normalized = name.toLowerCase();
-        if (denyList.includes(normalized)) {
+        if (denyList.includes(normalizedName)) {
           throw new Error(`Tool is disabled by policy: ${name}`);
         }
-        if (allowList.length > 0 && !allowList.includes(normalized)) {
+        if (allowList.length > 0 && !allowList.includes(normalizedName)) {
           throw new Error(`Tool not allowed by policy: ${name}`);
         }
         const currentCount = usageCounts.get(name) || 0;
-        const maxAllowed = maxPerRun.get(normalized) ?? defaultMax;
+        const maxAllowed = maxPerRun.get(normalizedName) ?? defaultMax;
         if (Number.isFinite(maxAllowed) && maxAllowed > 0 && currentCount >= maxAllowed) {
           throw new Error(`Tool usage limit reached for ${name} (max ${maxAllowed} per run)`);
         }
         usageCounts.set(name, currentCount + 1);
+
+        if (!isSystemTool && shouldNotifyTool(name) && progressConfig.notifyOnStart) {
+          const now = Date.now();
+          if (now - lastProgressNotifyAt >= progressConfig.minIntervalMs) {
+            lastProgressNotifyAt = now;
+            sendJobUpdate({
+              message: `Running ${name}...`,
+              level: 'progress',
+              notify: true,
+              data: { tool: name, stage: 'start' }
+            });
+          } else {
+            sendJobUpdate({
+              message: `Running ${name}...`,
+              level: 'progress',
+              notify: false,
+              data: { tool: name, stage: 'start' }
+            });
+          }
+        }
 
         const rawResult = await execute(args);
         const result = await maybeSummarizeToolResult(name, rawResult, runtime);
@@ -888,6 +951,14 @@ export function createTools(ctx: IpcContext, config: AgentRuntimeConfig['agent']
           output_bytes: outputBytes,
           output_truncated: outputTruncated
         });
+        if (!isSystemTool && shouldNotifyTool(name)) {
+          sendJobUpdate({
+            message: `${name} finished.`,
+            level: 'info',
+            notify: false,
+            data: { tool: name, stage: 'end', ok: true, duration_ms: Date.now() - start }
+          });
+        }
         return result;
       } catch (err) {
         onToolCall?.({
@@ -897,6 +968,14 @@ export function createTools(ctx: IpcContext, config: AgentRuntimeConfig['agent']
           duration_ms: Date.now() - start,
           error: err instanceof Error ? err.message : String(err)
         });
+        if (!isSystemTool && shouldNotifyTool(name) && progressConfig.notifyOnError) {
+          sendJobUpdate({
+            message: `${name} failed: ${err instanceof Error ? err.message : String(err)}`,
+            level: 'error',
+            notify: true,
+            data: { tool: name, stage: 'end', ok: false, duration_ms: Date.now() - start }
+          });
+        }
         throw err;
       }
     };

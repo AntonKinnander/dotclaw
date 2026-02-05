@@ -25,14 +25,10 @@ export {
   ENV_PATH,
 };
 
-// Legacy alias
-export const RUNTIME_DIR = DATA_DIR;
-
 export const ASSISTANT_NAME = runtime.agent.assistantName;
 export const SCHEDULER_POLL_INTERVAL = runtime.host.scheduler.pollIntervalMs;
 
 export const MAIN_GROUP_FOLDER = 'main';
-export const MODEL_CONFIG_PATH_EXPORT = MODEL_CONFIG_PATH;
 export { MODEL_CONFIG_PATH };
 
 // Use runtime config values with fallback to paths module defaults

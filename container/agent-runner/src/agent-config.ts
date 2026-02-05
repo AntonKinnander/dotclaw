@@ -60,6 +60,8 @@ export type AgentRuntimeConfig = {
       temperature: number;
       maxRetries: number;
       allowToolCalls: boolean;
+      minPromptTokens: number;
+      minResponseTokens: number;
     };
     tools: {
       maxToolSteps: number;
@@ -86,6 +88,13 @@ export type AgentRuntimeConfig = {
         dirs: string[];
         maxBytes: number;
         httpTimeoutMs: number;
+      };
+      progress: {
+        enabled: boolean;
+        minIntervalMs: number;
+        notifyTools: string[];
+        notifyOnStart: boolean;
+        notifyOnError: boolean;
       };
       toolSummary: {
         enabled: boolean;
@@ -160,7 +169,7 @@ const DEFAULT_AGENT_CONFIG: AgentRuntimeConfig['agent'] = {
   planner: {
     enabled: true,
     mode: 'auto',
-    minTokens: 600,
+    minTokens: 800,
     triggerRegex: '(plan|steps|roadmap|research|design|architecture|spec|strategy)',
     maxOutputTokens: 200,
     temperature: 0.2
@@ -170,7 +179,9 @@ const DEFAULT_AGENT_CONFIG: AgentRuntimeConfig['agent'] = {
     maxOutputTokens: 120,
     temperature: 0,
     maxRetries: 1,
-    allowToolCalls: false
+    allowToolCalls: false,
+    minPromptTokens: 400,
+    minResponseTokens: 160
   },
   tools: {
     maxToolSteps: 24,
@@ -197,6 +208,13 @@ const DEFAULT_AGENT_CONFIG: AgentRuntimeConfig['agent'] = {
       dirs: [],
       maxBytes: 800_000,
       httpTimeoutMs: 20_000
+    },
+    progress: {
+      enabled: true,
+      minIntervalMs: 30_000,
+      notifyTools: ['WebSearch', 'WebFetch', 'Bash', 'GitClone', 'NpmInstall'],
+      notifyOnStart: true,
+      notifyOnError: true
     },
     toolSummary: {
       enabled: true,

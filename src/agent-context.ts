@@ -20,6 +20,10 @@ export type AgentContext = {
   tokenEstimate: ReturnType<typeof getTokenEstimateConfig>;
   modelCapabilities: ModelCapabilities;
   dynamicMemoryBudget: number;
+  timings: {
+    context_build_ms?: number;
+    memory_recall_ms?: number;
+  };
 };
 
 /**
@@ -56,7 +60,9 @@ export async function buildAgentContext(params: {
   recallMaxTokens: number;
   toolAllow?: string[];
   toolDeny?: string[];
+  recallEnabled?: boolean;
 }): Promise<AgentContext> {
+  const startedAt = Date.now();
   const runtime = loadRuntimeConfig();
   const defaultModel = runtime.host.defaultModel;
   const modelRegistry = loadModelRegistry(defaultModel);
@@ -78,13 +84,19 @@ export async function buildAgentContext(params: {
     params.recallMaxTokens
   );
 
-  const memoryRecall = await buildHybridMemoryRecall({
-    groupFolder: params.groupFolder,
-    userId: params.userId ?? null,
-    query: params.recallQuery,
-    maxResults: params.recallMaxResults,
-    maxTokens: dynamicMemoryBudget
-  });
+  let memoryRecall: string[] = [];
+  let memoryRecallMs: number | undefined;
+  if (params.recallEnabled !== false && params.recallMaxResults > 0 && params.recallMaxTokens > 0) {
+    const recallStart = Date.now();
+    memoryRecall = await buildHybridMemoryRecall({
+      groupFolder: params.groupFolder,
+      userId: params.userId ?? null,
+      query: params.recallQuery,
+      maxResults: params.recallMaxResults,
+      maxTokens: dynamicMemoryBudget
+    });
+    memoryRecallMs = Date.now() - recallStart;
+  }
 
   const userProfile = buildUserProfile({
     groupFolder: params.groupFolder,
@@ -142,6 +154,10 @@ export async function buildAgentContext(params: {
     modelPricing,
     tokenEstimate,
     modelCapabilities,
-    dynamicMemoryBudget
+    dynamicMemoryBudget,
+    timings: {
+      context_build_ms: Date.now() - startedAt,
+      memory_recall_ms: memoryRecallMs
+    }
   };
 }

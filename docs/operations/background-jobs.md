@@ -17,6 +17,9 @@ DotClaw supports durable background jobs for long-running work that should finis
 - The agent starts a background job via `mcp__dotclaw__spawn_job`.
 - The job runs outside the main chat flow and reports completion when finished.
 - Long outputs are saved to job artifacts under `~/.dotclaw/groups/<group>/jobs/<job_id>/`.
+- Jobs emit periodic progress updates based on `host.backgroundJobs.progress` and tool activity (when enabled).
+- When queued from a user message, the system includes queue position, an initial ETA when available, and updated ETA hints on follow-up updates.
+- For auto-spawned jobs, the initial acknowledgement can include a brief planned-steps preview when available.
 
 Useful tools:
 
@@ -50,3 +53,11 @@ Key fields:
 - `autoSpawn.classifier.maxOutputTokens`: classifier max output tokens
 - `autoSpawn.classifier.temperature`: classifier temperature
 - `autoSpawn.classifier.confidenceThreshold`: minimum confidence to queue
+- `autoSpawn.classifier.adaptive`: optional adaptive threshold settings (queue-depth aware)
+
+Progress fields:
+
+- `progress.enabled`: toggle periodic background job updates
+- `progress.startDelayMs`: delay before the first “still running” update
+- `progress.intervalMs`: cadence for follow-up updates
+- `progress.maxUpdates`: maximum number of automatic progress messages per job

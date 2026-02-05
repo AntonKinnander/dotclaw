@@ -3,7 +3,7 @@ import { loadRuntimeConfig } from './runtime-config.js';
 
 let cachedLogger: pino.Logger | null = null;
 
-export function getLogger(): pino.Logger {
+function getLogger(): pino.Logger {
   if (cachedLogger) return cachedLogger;
   const runtime = loadRuntimeConfig();
   cachedLogger = pino({

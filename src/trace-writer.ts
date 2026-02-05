@@ -36,6 +36,7 @@ export type TraceRecord = {
   session_recall_count?: number;
   memory_items_upserted?: number;
   memory_items_extracted?: number;
+  timings?: Record<string, number>;
   error_code?: string;
   source?: string;
 };

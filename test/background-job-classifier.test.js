@@ -169,3 +169,70 @@ test('classifyBackgroundJob parses JSON embedded in text and handles invalid out
     else process.env.OPENROUTER_API_KEY = originalKey;
   }
 });
+
+test('classifyBackgroundJob adapts threshold based on queue depth', async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dotclaw-classifier-'));
+  const originalFetch = global.fetch;
+  const originalKey = process.env.OPENROUTER_API_KEY;
+
+  writeRuntimeConfig(tempDir, {
+    host: {
+      backgroundJobs: {
+        autoSpawn: {
+          enabled: true,
+          classifier: {
+            enabled: true,
+            model: 'openai/gpt-5-nano',
+            timeoutMs: 3000,
+            maxOutputTokens: 32,
+            temperature: 0,
+            confidenceThreshold: 0.6,
+            adaptive: {
+              enabled: true,
+              minThreshold: 0.5,
+              maxThreshold: 0.8,
+              queueDepthLow: 0,
+              queueDepthHigh: 4
+            }
+          }
+        }
+      }
+    }
+  });
+
+  global.fetch = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      choices: [{ message: { content: '{"background":true,"confidence":0.55,"reason":"multi-step"}' } }]
+    })
+  });
+  process.env.OPENROUTER_API_KEY = 'test-key';
+
+  try {
+    await withTempHome(tempDir, async () => {
+      const { classifyBackgroundJob } = await importFresh(distPath('background-job-classifier.js'));
+      const resultLow = await classifyBackgroundJob({
+        lastMessage: makeMessage('Deep research request'),
+        recentMessages: [makeMessage('Deep research request')],
+        isGroup: false,
+        chatType: 'private',
+        queueDepth: 0
+      });
+      assert.equal(resultLow.shouldBackground, true);
+
+      const resultHigh = await classifyBackgroundJob({
+        lastMessage: makeMessage('Deep research request'),
+        recentMessages: [makeMessage('Deep research request')],
+        isGroup: false,
+        chatType: 'private',
+        queueDepth: 6
+      });
+      assert.equal(resultHigh.shouldBackground, false);
+    });
+  } finally {
+    global.fetch = originalFetch;
+    if (originalKey === undefined) delete process.env.OPENROUTER_API_KEY;
+    else process.env.OPENROUTER_API_KEY = originalKey;
+  }
+});

@@ -18,7 +18,7 @@ The `.env` file must be placed at `~/.dotclaw/.env` (or `$DOTCLAW_HOME/.env` if 
 ## Optional
 
 - `BRAVE_SEARCH_API_KEY` (enables WebSearch)
-- `TZ` (override host timezone)
+- `TZ` (override host timezone; affects scheduler timing and agent timestamp interpretation)
 - `DOTCLAW_HOME` (override config/data directory, default: `~/.dotclaw`)
 
 ## Example

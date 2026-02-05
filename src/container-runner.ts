@@ -34,6 +34,10 @@ import type { ContainerInput, ContainerOutput } from './container-protocol.js';
 import { logger } from './logger.js';
 
 const runtime = loadRuntimeConfig();
+const CONTAINER_INSTANCE_ID_RAW = runtime.host.container.instanceId || '';
+const CONTAINER_INSTANCE_ID = CONTAINER_INSTANCE_ID_RAW.trim()
+  ? CONTAINER_INSTANCE_ID_RAW.trim().replace(/[^a-zA-Z0-9_.-]+/g, '-').replace(/^-+|-+$/g, '')
+  : '';
 
 // Sentinel markers for robust output parsing (must match agent-runner)
 const CONTAINER_ID_DIR = path.join(DATA_DIR, 'tmp');
@@ -310,6 +314,9 @@ function buildContainerArgs(mounts: VolumeMount[], cidFile?: string): string[] {
 
 function buildDaemonArgs(mounts: VolumeMount[], containerName: string, groupFolder: string): string[] {
   const args: string[] = ['run', '-d', '--rm', '--name', containerName, '--label', `dotclaw.group=${groupFolder}`];
+  if (CONTAINER_INSTANCE_ID) {
+    args.push('--label', `dotclaw.instance=${CONTAINER_INSTANCE_ID}`);
+  }
 
   // Security hardening
   args.push('--cap-drop=ALL');
@@ -352,7 +359,8 @@ function buildDaemonArgs(mounts: VolumeMount[], containerName: string, groupFold
 }
 
 function getDaemonContainerName(groupFolder: string): string {
-  return `dotclaw-agent-${groupFolder}`;
+  const instance = CONTAINER_INSTANCE_ID ? `-${CONTAINER_INSTANCE_ID}` : '';
+  return `dotclaw-agent${instance}-${groupFolder}`;
 }
 
 function isContainerRunning(name: string): boolean {
