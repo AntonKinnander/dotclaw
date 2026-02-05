@@ -2,9 +2,8 @@ import fs from 'fs';
 import path from 'path';
 import { Worker } from 'worker_threads';
 import { fileURLToPath } from 'url';
-import { runAgentOnce } from './index.js';
 import { loadAgentConfig } from './agent-config.js';
-import type { ContainerInput } from './container-protocol.js';
+import type { ContainerInput, ContainerOutput } from './container-protocol.js';
 
 const REQUESTS_DIR = '/workspace/ipc/agent_requests';
 const RESPONSES_DIR = '/workspace/ipc/agent_responses';
@@ -32,6 +31,11 @@ function ensureDirs(): void {
 function getWorkerPath(): string {
   const thisFile = fileURLToPath(import.meta.url);
   return path.join(path.dirname(thisFile), 'heartbeat-worker.js');
+}
+
+function getRequestWorkerPath(): string {
+  const thisFile = fileURLToPath(import.meta.url);
+  return path.join(path.dirname(thisFile), 'request-worker.js');
 }
 
 let workerRestarts = 0;
@@ -95,6 +99,61 @@ function postWorkerMessage(msg: { type: string; requestId?: string }): void {
 
 let currentRequestId: string | null = null;
 
+async function runRequestWithCancellation(requestId: string, input: ContainerInput): Promise<{ output: ContainerOutput | null; canceled: boolean }> {
+  const cancelFile = path.join(REQUESTS_DIR, requestId + '.cancel');
+  const workerPath = getRequestWorkerPath();
+  const worker = new Worker(workerPath, { workerData: { input } });
+
+  return await new Promise((resolve, reject) => {
+    let settled = false;
+
+    const finish = (fn: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearInterval(cancelTimer);
+      fn();
+    };
+
+    const handleCancel = (): void => {
+      if (!fs.existsSync(cancelFile)) return;
+      finish(() => {
+        try { fs.unlinkSync(cancelFile); } catch { /* already removed */ }
+        void worker.terminate().catch(() => undefined);
+        resolve({ output: null, canceled: true });
+      });
+    };
+
+    const cancelTimer = setInterval(handleCancel, Math.max(100, Math.floor(POLL_MS / 2)));
+    handleCancel();
+
+    worker.on('message', (message: unknown) => {
+      finish(() => {
+        const payload = (message && typeof message === 'object') ? (message as Record<string, unknown>) : null;
+        if (payload?.ok === true && payload.output && typeof payload.output === 'object') {
+          resolve({ output: payload.output as ContainerOutput, canceled: false });
+          return;
+        }
+        const errMessage = typeof payload?.error === 'string' ? payload.error : 'Agent worker failed';
+        reject(new Error(errMessage));
+      });
+    });
+
+    worker.on('error', (err) => {
+      finish(() => reject(err));
+    });
+
+    worker.on('exit', (code) => {
+      finish(() => {
+        if (code === 0) {
+          reject(new Error('Agent worker exited without output'));
+          return;
+        }
+        reject(new Error(`Agent worker exited with code ${code}`));
+      });
+    });
+  });
+}
+
 // --- Request processing ---
 
 function isContainerInput(value: unknown): value is ContainerInput {
@@ -137,7 +196,19 @@ async function processRequests(): Promise<void> {
       currentRequestId = requestId;
       postWorkerMessage({ type: 'processing', requestId });
 
-      const output = await runAgentOnce(input);
+      const { output, canceled } = await runRequestWithCancellation(requestId, input);
+      if (canceled) {
+        try { fs.unlinkSync(filePath); } catch { /* request file already removed */ }
+        continue;
+      }
+      if (!output) {
+        throw new Error('Agent worker returned no output');
+      }
+      if (fs.existsSync(cancelFile)) {
+        try { fs.unlinkSync(cancelFile); } catch { /* already removed */ }
+        try { fs.unlinkSync(filePath); } catch { /* request file already removed */ }
+        continue;
+      }
       const responsePath = path.join(RESPONSES_DIR, `${requestId}.json`);
       const tmpPath = responsePath + '.tmp';
       fs.writeFileSync(tmpPath, JSON.stringify(output));

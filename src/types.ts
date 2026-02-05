@@ -45,6 +45,19 @@ export interface Session {
   [folder: string]: string;
 }
 
+export interface MessageAttachment {
+  type: 'photo' | 'document' | 'voice' | 'video' | 'audio';
+  file_id: string;
+  file_unique_id: string;
+  file_name?: string;
+  mime_type?: string;
+  file_size?: number;
+  local_path?: string;
+  duration?: number;
+  width?: number;
+  height?: number;
+}
+
 export interface NewMessage {
   id: string;
   chat_jid: string;
@@ -52,6 +65,8 @@ export interface NewMessage {
   sender_name: string;
   content: string;
   timestamp: string;
+  attachments?: MessageAttachment[];
+  attachments_json?: string | null;
 }
 
 export interface ScheduledTask {

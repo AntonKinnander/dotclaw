@@ -100,6 +100,16 @@ export async function executeAgentRun(params: {
   maxToolSteps?: number;
   timeoutMs?: number;
   timezone?: string;
+  attachments?: Array<{
+    type: 'photo' | 'document' | 'voice' | 'video' | 'audio';
+    path: string;
+    file_name?: string;
+    mime_type?: string;
+    file_size?: number;
+    duration?: number;
+    width?: number;
+    height?: number;
+  }>;
 }): Promise<{ output: ContainerOutput; context: AgentContext }> {
   const group = params.group;
   const isMain = group.folder === MAIN_GROUP_FOLDER;
@@ -156,7 +166,8 @@ export async function executeAgentRun(params: {
     disableResponseValidation: params.disableResponseValidation,
     responseValidationMaxRetries: params.responseValidationMaxRetries,
     disableMemoryExtraction: params.disableMemoryExtraction,
-    maxToolSteps: params.maxToolSteps
+    maxToolSteps: params.maxToolSteps,
+    attachments: params.attachments
   }, { abortSignal: params.abortSignal, timeoutMs: params.timeoutMs });
 
   let output: ContainerOutput;

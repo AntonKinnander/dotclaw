@@ -41,6 +41,7 @@ export const CONTAINER_TIMEOUT = runtime.host.container.timeoutMs;
 export const CONTAINER_MAX_OUTPUT_SIZE = runtime.host.container.maxOutputBytes;
 export const IPC_POLL_INTERVAL = runtime.host.ipc.pollIntervalMs;
 export const CONTAINER_MODE = runtime.host.container.mode;
+export const CONTAINER_PRIVILEGED = runtime.host.container.privileged;
 export const CONTAINER_DAEMON_POLL_MS = runtime.host.container.daemonPollMs;
 export const CONTAINER_PIDS_LIMIT = runtime.host.container.pidsLimit;
 export const CONTAINER_MEMORY = runtime.host.container.memory;

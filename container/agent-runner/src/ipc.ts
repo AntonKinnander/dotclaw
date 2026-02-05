@@ -92,16 +92,151 @@ export function createIpcHandlers(ctx: IpcContext, config: IpcConfig) {
   const { chatJid, groupFolder, isMain } = ctx;
 
   return {
-    async sendMessage(text: string) {
-      const data = {
+    async sendMessage(text: string, options?: { reply_to_message_id?: number }) {
+      const data: Record<string, unknown> = {
         type: 'message',
         chatJid,
         text,
         groupFolder,
         timestamp: new Date().toISOString()
       };
+      if (options?.reply_to_message_id) data.reply_to_message_id = options.reply_to_message_id;
       const filename = writeIpcFile(MESSAGES_DIR, data);
       return { ok: true, id: filename };
+    },
+    async sendFile(args: { path: string; caption?: string; reply_to_message_id?: number }) {
+      const data: Record<string, unknown> = {
+        type: 'send_file',
+        chatJid,
+        path: args.path,
+        caption: args.caption,
+        groupFolder,
+        timestamp: new Date().toISOString()
+      };
+      if (args.reply_to_message_id) data.reply_to_message_id = args.reply_to_message_id;
+      const filename = writeIpcFile(MESSAGES_DIR, data);
+      return { ok: true, id: filename };
+    },
+    async sendPhoto(args: { path: string; caption?: string; reply_to_message_id?: number }) {
+      const data: Record<string, unknown> = {
+        type: 'send_photo',
+        chatJid,
+        path: args.path,
+        caption: args.caption,
+        groupFolder,
+        timestamp: new Date().toISOString()
+      };
+      if (args.reply_to_message_id) data.reply_to_message_id = args.reply_to_message_id;
+      const filename = writeIpcFile(MESSAGES_DIR, data);
+      return { ok: true, id: filename };
+    },
+    async sendVoice(args: { path: string; caption?: string; duration?: number; reply_to_message_id?: number }) {
+      const data: Record<string, unknown> = {
+        type: 'send_voice',
+        chatJid,
+        path: args.path,
+        caption: args.caption,
+        duration: args.duration,
+        groupFolder,
+        timestamp: new Date().toISOString()
+      };
+      if (args.reply_to_message_id) data.reply_to_message_id = args.reply_to_message_id;
+      const filename = writeIpcFile(MESSAGES_DIR, data);
+      return { ok: true, id: filename };
+    },
+    async sendAudio(args: { path: string; caption?: string; duration?: number; performer?: string; title?: string; reply_to_message_id?: number }) {
+      const data: Record<string, unknown> = {
+        type: 'send_audio',
+        chatJid,
+        path: args.path,
+        caption: args.caption,
+        duration: args.duration,
+        performer: args.performer,
+        title: args.title,
+        groupFolder,
+        timestamp: new Date().toISOString()
+      };
+      if (args.reply_to_message_id) data.reply_to_message_id = args.reply_to_message_id;
+      const filename = writeIpcFile(MESSAGES_DIR, data);
+      return { ok: true, id: filename };
+    },
+    async sendLocation(args: { latitude: number; longitude: number; reply_to_message_id?: number }) {
+      const data: Record<string, unknown> = {
+        type: 'send_location',
+        chatJid,
+        latitude: args.latitude,
+        longitude: args.longitude,
+        groupFolder,
+        timestamp: new Date().toISOString()
+      };
+      if (args.reply_to_message_id) data.reply_to_message_id = args.reply_to_message_id;
+      const filename = writeIpcFile(MESSAGES_DIR, data);
+      return { ok: true, id: filename };
+    },
+    async sendContact(args: { phone_number: string; first_name: string; last_name?: string; reply_to_message_id?: number }) {
+      const data: Record<string, unknown> = {
+        type: 'send_contact',
+        chatJid,
+        phone_number: args.phone_number,
+        first_name: args.first_name,
+        last_name: args.last_name,
+        groupFolder,
+        timestamp: new Date().toISOString()
+      };
+      if (args.reply_to_message_id) data.reply_to_message_id = args.reply_to_message_id;
+      const filename = writeIpcFile(MESSAGES_DIR, data);
+      return { ok: true, id: filename };
+    },
+    async sendPoll(args: {
+      question: string;
+      options: string[];
+      is_anonymous?: boolean;
+      allows_multiple_answers?: boolean;
+      type?: string;
+      correct_option_id?: number;
+      reply_to_message_id?: number;
+    }) {
+      const data: Record<string, unknown> = {
+        type: 'send_poll',
+        chatJid,
+        question: args.question,
+        options: args.options,
+        is_anonymous: args.is_anonymous,
+        allows_multiple_answers: args.allows_multiple_answers,
+        poll_type: args.type,
+        groupFolder,
+        timestamp: new Date().toISOString()
+      };
+      if (typeof args.correct_option_id === 'number') data.correct_option_id = args.correct_option_id;
+      if (args.reply_to_message_id) data.reply_to_message_id = args.reply_to_message_id;
+      const filename = writeIpcFile(MESSAGES_DIR, data);
+      return { ok: true, id: filename };
+    },
+    async sendButtons(args: { text: string; buttons: Array<Array<{ text: string; url?: string; callback_data?: string }>>; reply_to_message_id?: number }) {
+      const data: Record<string, unknown> = {
+        type: 'send_buttons',
+        chatJid,
+        text: args.text,
+        buttons: args.buttons,
+        groupFolder,
+        timestamp: new Date().toISOString()
+      };
+      if (args.reply_to_message_id) data.reply_to_message_id = args.reply_to_message_id;
+      const filename = writeIpcFile(MESSAGES_DIR, data);
+      return { ok: true, id: filename };
+    },
+    async editMessage(args: { message_id: number; text: string; chat_jid?: string }) {
+      return requestResponse('edit_message', {
+        message_id: args.message_id,
+        text: args.text,
+        chat_jid: args.chat_jid || chatJid
+      }, config);
+    },
+    async deleteMessage(args: { message_id: number; chat_jid?: string }) {
+      return requestResponse('delete_message', {
+        message_id: args.message_id,
+        chat_jid: args.chat_jid || chatJid
+      }, config);
     },
     async scheduleTask(args: {
       prompt: string;

@@ -28,6 +28,7 @@ export type RuntimeConfig = {
       timeoutMs: number;
       maxOutputBytes: number;
       mode: 'daemon' | 'ephemeral';
+      privileged: boolean;
       daemonPollMs: number;
       pidsLimit: number;
       memory: string;
@@ -356,6 +357,7 @@ const DEFAULT_CONFIG: RuntimeConfig = {
       timeoutMs: DEFAULT_CONTAINER_TIMEOUT_MS,
       maxOutputBytes: 20 * 1024 * 1024,
       mode: 'daemon',
+      privileged: true,
       daemonPollMs: 200,
       pidsLimit: 256,
       memory: '',

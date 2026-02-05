@@ -1,12 +1,14 @@
 import fs from 'fs';
 import path from 'path';
-import { MAINTENANCE_INTERVAL_MS, TRACE_DIR, TRACE_RETENTION_DAYS, DATA_DIR, JOB_RETENTION_MS, TASK_LOG_RETENTION_MS } from './config.js';
+import { MAINTENANCE_INTERVAL_MS, TRACE_DIR, TRACE_RETENTION_DAYS, DATA_DIR, JOB_RETENTION_MS, TASK_LOG_RETENTION_MS, GROUPS_DIR } from './config.js';
 import { runMemoryMaintenance } from './memory-store.js';
 import { cleanupCompletedMessages, cleanupCompletedBackgroundJobs, cleanupOldTaskRunLogs, cleanupOldToolAudit, cleanupOldMessageTraces, cleanupOldUserFeedback } from './db.js';
 import { logger } from './logger.js';
 
 const IPC_FILE_MAX_AGE_MS = 5 * 60 * 1000; // 5 minutes
 const IPC_ERROR_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours for error files
+const INBOX_RETENTION_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
+const INBOX_MAX_BYTES = 500 * 1024 * 1024; // 500 MB per group inbox
 
 function parseTraceDate(filename: string): Date | null {
   const match = filename.match(/trace-(\d{4}-\d{2}-\d{2})\.jsonl$/);
@@ -66,7 +68,9 @@ export function cleanupOrphanedIpcFiles(): number {
         if (!fs.existsSync(dirPath)) continue;
 
         try {
-          const files = fs.readdirSync(dirPath).filter(f => f.endsWith('.json'));
+          const files = fs.readdirSync(dirPath).filter(f =>
+            f.endsWith('.json') || (subDir === 'agent_requests' && f.endsWith('.cancel'))
+          );
           for (const file of files) {
             const filePath = path.join(dirPath, file);
             try {
@@ -150,6 +154,63 @@ function cleanupStaleCidFiles(): number {
   return removed;
 }
 
+function cleanupInboxFiles(): { removed: number; reclaimedBytes: number } {
+  if (!fs.existsSync(GROUPS_DIR)) return { removed: 0, reclaimedBytes: 0 };
+  const cutoff = Date.now() - INBOX_RETENTION_MS;
+  let removed = 0;
+  let reclaimedBytes = 0;
+  try {
+    const groups = fs.readdirSync(GROUPS_DIR).filter(entry => {
+      const fullPath = path.join(GROUPS_DIR, entry);
+      try {
+        return fs.statSync(fullPath).isDirectory();
+      } catch {
+        return false;
+      }
+    });
+
+    for (const groupFolder of groups) {
+      const inboxDir = path.join(GROUPS_DIR, groupFolder, 'inbox');
+      if (!fs.existsSync(inboxDir)) continue;
+      const fileStats: Array<{ path: string; mtimeMs: number; size: number }> = [];
+      for (const name of fs.readdirSync(inboxDir)) {
+        const filePath = path.join(inboxDir, name);
+        try {
+          const stat = fs.statSync(filePath);
+          if (!stat.isFile()) continue;
+          if (stat.mtimeMs < cutoff) {
+            fs.unlinkSync(filePath);
+            removed += 1;
+            reclaimedBytes += stat.size;
+            continue;
+          }
+          fileStats.push({ path: filePath, mtimeMs: stat.mtimeMs, size: stat.size });
+        } catch {
+          // Skip files we cannot stat/delete.
+        }
+      }
+
+      let totalBytes = fileStats.reduce((sum, entry) => sum + entry.size, 0);
+      if (totalBytes <= INBOX_MAX_BYTES) continue;
+      fileStats.sort((a, b) => a.mtimeMs - b.mtimeMs);
+      for (const entry of fileStats) {
+        if (totalBytes <= INBOX_MAX_BYTES) break;
+        try {
+          fs.unlinkSync(entry.path);
+          totalBytes -= entry.size;
+          removed += 1;
+          reclaimedBytes += entry.size;
+        } catch {
+          // Skip files we cannot delete.
+        }
+      }
+    }
+  } catch {
+    // Ignore top-level inbox cleanup errors.
+  }
+  return { removed, reclaimedBytes };
+}
+
 let maintenanceTimer: NodeJS.Timeout | null = null;
 
 export function cleanupStaleSessionSnapshots(): number {
@@ -215,9 +276,13 @@ export function startMaintenanceLoop(): void {
 
       const cidRemoved = cleanupStaleCidFiles();
       const sessionSnapRemoved = cleanupStaleSessionSnapshots();
+      const inboxCleanup = cleanupInboxFiles();
       if (sessionSnapRemoved > 0) logger.info({ count: sessionSnapRemoved }, 'Cleaned up stale session snapshots');
+      if (inboxCleanup.removed > 0) {
+        logger.info({ removed: inboxCleanup.removed, reclaimedBytes: inboxCleanup.reclaimedBytes }, 'Cleaned up group inbox files');
+      }
 
-      if (memResult.expired > 0 || memResult.pruned > 0 || memResult.decayed > 0 || traceRemoved > 0 || ipcRemoved > 0 || ipcErrorsRemoved > 0 || queuePurged > 0 || jobsPurged > 0 || logsPurged > 0 || auditPurged > 0 || tracesPurged > 0 || feedbackPurged > 0 || cidRemoved > 0 || sessionSnapRemoved > 0) {
+      if (memResult.expired > 0 || memResult.pruned > 0 || memResult.decayed > 0 || traceRemoved > 0 || ipcRemoved > 0 || ipcErrorsRemoved > 0 || queuePurged > 0 || jobsPurged > 0 || logsPurged > 0 || auditPurged > 0 || tracesPurged > 0 || feedbackPurged > 0 || cidRemoved > 0 || sessionSnapRemoved > 0 || inboxCleanup.removed > 0) {
         logger.info({
           expired: memResult.expired,
           pruned: memResult.pruned,
@@ -233,7 +298,9 @@ export function startMaintenanceLoop(): void {
           tracesPurged,
           feedbackPurged,
           cidRemoved,
-          sessionSnapRemoved
+          sessionSnapRemoved,
+          inboxFilesRemoved: inboxCleanup.removed,
+          inboxBytesReclaimed: inboxCleanup.reclaimedBytes
         }, 'Maintenance completed');
       }
     } catch (err) {

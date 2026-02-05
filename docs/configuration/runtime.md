@@ -10,12 +10,13 @@ title: Runtime Config
 
 ```json
 {
-  "host": {
-    "logLevel": "info",
-    "container": {
-      "mode": "daemon",
-      "instanceId": ""
-    },
+    "host": {
+      "logLevel": "info",
+      "container": {
+        "mode": "daemon",
+        "privileged": true,
+        "instanceId": ""
+      },
     "metrics": {
       "port": 3001,
       "enabled": true
@@ -109,6 +110,7 @@ title: Runtime Config
 ## Key sections
 
 - `host.container` controls Docker image, timeouts, resource limits, and mode.
+- `host.container.privileged` controls whether containers run in privileged mode (`true` by default).
 - `host.container.instanceId` lets you run multiple DotClaw instances on the same machine by
   namespacing daemon container names.
 - `host.metrics.enabled` and `host.metrics.port` expose Prometheus metrics on `http://localhost:<port>/metrics`.
@@ -131,6 +133,20 @@ title: Runtime Config
 - Keep secrets out of this file.
 - Match types and structure to the defaults or overrides will be ignored.
 - Restart DotClaw after changes.
+
+## Container privilege override
+
+If you want to disable privileged containers, set:
+
+```json
+{
+  "host": {
+    "container": {
+      "privileged": false
+    }
+  }
+}
+```
 
 ## Background jobs
 

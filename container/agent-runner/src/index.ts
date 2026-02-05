@@ -506,6 +506,18 @@ function buildSystemInstructions(params: {
     '- `GitClone`: clone git repositories into the workspace.',
     '- `NpmInstall`: install npm dependencies in the workspace.',
     '- `mcp__dotclaw__send_message`: send Telegram messages.',
+    '- `mcp__dotclaw__send_file`: send a file/document.',
+    '- `mcp__dotclaw__send_photo`: send a photo with compression.',
+    '- `mcp__dotclaw__send_voice`: send a voice message (.ogg format).',
+    '- `mcp__dotclaw__send_audio`: send an audio file (mp3, m4a, etc.).',
+    '- `mcp__dotclaw__send_location`: send a map pin (latitude/longitude).',
+    '- `mcp__dotclaw__send_contact`: send a contact card (phone + name).',
+    '- `mcp__dotclaw__send_poll`: create a Telegram poll.',
+    '- `mcp__dotclaw__send_buttons`: send a message with inline keyboard buttons.',
+    '- `mcp__dotclaw__edit_message`: edit a previously sent message.',
+    '- `mcp__dotclaw__delete_message`: delete a message.',
+    '- `mcp__dotclaw__download_url`: download a URL to the workspace as a file.',
+    '- Users may send photos, documents, voice messages, and videos. These are downloaded to `/workspace/group/inbox/` and referenced as `<attachment>` tags in messages. Process them with Read/Bash/Python tools.',
     '- `mcp__dotclaw__schedule_task`: schedule tasks (set `timezone` for locale-specific schedules).',
     '- `mcp__dotclaw__run_task`: run a scheduled task immediately.',
     '- `mcp__dotclaw__list_tasks`, `mcp__dotclaw__pause_task`, `mcp__dotclaw__resume_task`, `mcp__dotclaw__cancel_task`.',
@@ -1179,6 +1191,16 @@ export async function runAgentOnce(input: ContainerInput): Promise<ContainerOutp
   let prompt = input.prompt;
   if (input.isScheduledTask) {
     prompt = `[SCHEDULED TASK - You are running automatically, not in response to a user message. Use mcp__dotclaw__send_message if needed to communicate with the user.]\n\n${input.prompt}`;
+  }
+  if (Array.isArray(input.attachments) && input.attachments.length > 0) {
+    const attachmentSummary = input.attachments.map(attachment => {
+      const parts = [`type=${attachment.type}`, `path=${attachment.path}`];
+      if (attachment.file_name) parts.push(`filename=${attachment.file_name}`);
+      if (attachment.mime_type) parts.push(`mime=${attachment.mime_type}`);
+      if (Number.isFinite(attachment.file_size)) parts.push(`size=${attachment.file_size}`);
+      return `- ${parts.join(' ')}`;
+    }).join('\n');
+    prompt = `${prompt}\n\n<latest_attachments>\n${attachmentSummary}\n</latest_attachments>`;
   }
 
   appendHistory(sessionCtx, 'user', prompt);

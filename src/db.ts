@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import {
   NewMessage,
+  MessageAttachment,
   ScheduledTask,
   TaskRunLog,
   BackgroundJob,
@@ -226,6 +227,7 @@ export function initDatabase(): void {
   addColumnIfMissing(`ALTER TABLE scheduled_tasks ADD COLUMN running_since TEXT`);
   addColumnIfMissing(`ALTER TABLE scheduled_tasks ADD COLUMN timezone TEXT`);
   addColumnIfMissing(`ALTER TABLE message_queue ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0`);
+  addColumnIfMissing(`ALTER TABLE messages ADD COLUMN attachments_json TEXT`);
 }
 
 /**
@@ -239,10 +241,12 @@ export function storeMessage(
   senderName: string,
   content: string,
   timestamp: string,
-  isFromMe: boolean
+  isFromMe: boolean,
+  attachments?: MessageAttachment[]
 ): void {
-  db.prepare(`INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me) VALUES (?, ?, ?, ?, ?, ?, ?)`)
-    .run(msgId, chatId, senderId, senderName, content, timestamp, isFromMe ? 1 : 0);
+  const attachmentsJson = attachments && attachments.length > 0 ? JSON.stringify(attachments) : null;
+  db.prepare(`INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, attachments_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(msgId, chatId, senderId, senderName, content, timestamp, isFromMe ? 1 : 0, attachmentsJson);
 }
 
 export function upsertChat(params: { chatId: string; name?: string | null; lastMessageTime?: string | null }): void {
@@ -273,7 +277,7 @@ export function getMessagesSinceCursor(
   const timestamp = sinceTimestamp || '1970-01-01T00:00:00.000Z';
   const messageId = sinceMessageId || '0';
   const sql = `
-    SELECT id, chat_jid, sender, sender_name, content, timestamp
+    SELECT id, chat_jid, sender, sender_name, content, timestamp, attachments_json
     FROM messages
     WHERE chat_jid = ? AND is_from_me = 0 AND (
       timestamp > ? OR (timestamp = ? AND CAST(id AS INTEGER) > CAST(? AS INTEGER))

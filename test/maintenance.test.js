@@ -61,7 +61,9 @@ test('cleanupTraceFiles returns 0 when trace dir has no old files', async () => 
 test('cleanupOrphanedIpcFiles removes stale IPC files', async () => {
   await withTempHome(tmpDir, async () => {
     const ipcDir = path.join(tmpDir, 'data', 'ipc', 'main', 'requests');
+    const agentRequestsDir = path.join(tmpDir, 'data', 'ipc', 'main', 'agent_requests');
     fs.mkdirSync(ipcDir, { recursive: true });
+    fs.mkdirSync(agentRequestsDir, { recursive: true });
 
     // Create a stale file (set mtime to 10 minutes ago)
     const staleFile = path.join(ipcDir, 'old-request.json');
@@ -73,12 +75,21 @@ test('cleanupOrphanedIpcFiles removes stale IPC files', async () => {
     const freshFile = path.join(ipcDir, 'fresh-request.json');
     fs.writeFileSync(freshFile, '{}');
 
+    // Create stale and fresh daemon cancel sentinels
+    const staleCancel = path.join(agentRequestsDir, 'old-request.cancel');
+    fs.writeFileSync(staleCancel, '');
+    fs.utimesSync(staleCancel, pastTime, pastTime);
+    const freshCancel = path.join(agentRequestsDir, 'fresh-request.cancel');
+    fs.writeFileSync(freshCancel, '');
+
     const mod = await importFresh(distPath('maintenance.js'));
     const removed = mod.cleanupOrphanedIpcFiles();
 
-    assert.equal(removed, 1);
+    assert.equal(removed, 2);
     assert.ok(!fs.existsSync(staleFile), 'Stale file should be removed');
+    assert.ok(!fs.existsSync(staleCancel), 'Stale cancel sentinel should be removed');
     assert.ok(fs.existsSync(freshFile), 'Fresh file should remain');
+    assert.ok(fs.existsSync(freshCancel), 'Fresh cancel sentinel should remain');
   });
 });
 

@@ -10,6 +10,7 @@ import {
   GROUPS_DIR,
   IPC_POLL_INTERVAL,  TIMEZONE,
   CONTAINER_MODE,
+  CONTAINER_PRIVILEGED,
   WARM_START_ENABLED,
   ENV_PATH,
   BATCH_WINDOW_MS,
@@ -18,7 +19,7 @@ import {
 
 // Load .env from the canonical location (~/.dotclaw/.env)
 dotenv.config({ path: ENV_PATH });
-import { RegisteredGroup, Session, BackgroundJobStatus } from './types.js';
+import { RegisteredGroup, Session, BackgroundJobStatus, MessageAttachment } from './types.js';
 import {
   initDatabase,
   closeDatabase,
@@ -63,6 +64,7 @@ import {
 import type { ContainerOutput } from './container-protocol.js';
 import type { AgentContext } from './agent-context.js';
 import { loadJson, saveJson, isSafeGroupFolder } from './utils.js';
+import { hostPathToContainerGroupPath, resolveContainerGroupPathToHost } from './path-mapping.js';
 import { writeTrace } from './trace-writer.js';
 import { formatTelegramMessage, TELEGRAM_PARSE_MODE } from './telegram-format.js';
 import {
@@ -258,6 +260,8 @@ let registeredGroups: Record<string, RegisteredGroup> = {};
 
 const TELEGRAM_MAX_MESSAGE_LENGTH = 4000;
 const TELEGRAM_SEND_DELAY_MS = 250;
+const TELEGRAM_MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
+const TELEGRAM_FILE_DOWNLOAD_TIMEOUT_MS = 45_000;
 const MESSAGE_QUEUE_MAX_RETRIES = Math.max(1, runtime.host.messageQueue.maxRetries ?? 4);
 const MESSAGE_QUEUE_RETRY_BASE_MS = Math.max(250, runtime.host.messageQueue.retryBaseMs ?? 3_000);
 const MESSAGE_QUEUE_RETRY_MAX_MS = Math.max(MESSAGE_QUEUE_RETRY_BASE_MS, runtime.host.messageQueue.retryMaxMs ?? 60_000);
@@ -519,19 +523,22 @@ function splitPlainText(text: string, maxLength: number): string[] {
 async function sendMessage(
   chatId: string,
   text: string,
-  options?: { messageThreadId?: number; parseMode?: string | null }
+  options?: { messageThreadId?: number; parseMode?: string | null; replyToMessageId?: number }
 ): Promise<{ success: boolean; messageId?: string }> {
   const parseMode = options?.parseMode === undefined ? TELEGRAM_PARSE_MODE : options.parseMode;
   const chunks = parseMode
     ? formatTelegramMessage(text, TELEGRAM_MAX_MESSAGE_LENGTH)
     : splitPlainText(text, TELEGRAM_MAX_MESSAGE_LENGTH);
   let firstMessageId: string | undefined;
-  const sendChunk = async (chunk: string): Promise<boolean> => {
+  const sendChunk = async (chunk: string, isFirst: boolean): Promise<boolean> => {
     for (let attempt = 1; attempt <= TELEGRAM_SEND_RETRIES; attempt += 1) {
       try {
         const payload: Record<string, unknown> = {};
         if (parseMode) payload.parse_mode = parseMode;
         if (options?.messageThreadId) payload.message_thread_id = options.messageThreadId;
+        if (isFirst && options?.replyToMessageId) {
+          payload.reply_parameters = { message_id: options.replyToMessageId, allow_sending_without_reply: true };
+        }
         const sent = await telegrafBot.telegram.sendMessage(chatId, chunk, payload);
         if (!firstMessageId) {
           firstMessageId = String(sent.message_id);
@@ -555,7 +562,7 @@ async function sendMessage(
   try {
     // Telegram bots send messages as themselves, no prefix needed
     for (let i = 0; i < chunks.length; i += 1) {
-      const ok = await sendChunk(chunks[i]);
+      const ok = await sendChunk(chunks[i], i === 0);
       if (!ok) return { success: false };
       if (i < chunks.length - 1) {
         await sleep(TELEGRAM_SEND_DELAY_MS);
@@ -567,6 +574,399 @@ async function sendMessage(
     logger.error({ chatId, err }, 'Failed to send message');
     return { success: false };
   }
+}
+
+function hostPathToContainerPath(hostPath: string, groupFolder: string): string | null {
+  return hostPathToContainerGroupPath(hostPath, groupFolder, GROUPS_DIR);
+}
+
+function resolveContainerPathToHost(containerPath: string, groupFolder: string): string | null {
+  return resolveContainerGroupPathToHost(containerPath, groupFolder, GROUPS_DIR);
+}
+
+async function sendDocument(
+  chatId: string,
+  filePath: string,
+  options?: { caption?: string; replyToMessageId?: number }
+): Promise<{ success: boolean }> {
+  for (let attempt = 1; attempt <= TELEGRAM_SEND_RETRIES; attempt += 1) {
+    try {
+      const payload: Record<string, unknown> = {};
+      if (options?.caption) payload.caption = options.caption;
+      if (options?.replyToMessageId) {
+        payload.reply_parameters = { message_id: options.replyToMessageId, allow_sending_without_reply: true };
+      }
+      await telegrafBot.telegram.sendDocument(chatId, { source: filePath }, payload);
+      logger.info({ chatId, filePath }, 'Document sent');
+      return { success: true };
+    } catch (err) {
+      if (!isRetryableTelegramError(err) || attempt === TELEGRAM_SEND_RETRIES) {
+        logger.error({ chatId, filePath, attempt, err }, 'Failed to send document');
+        return { success: false };
+      }
+      const retryAfterMs = getTelegramRetryAfterMs(err);
+      const delayMs = retryAfterMs ?? (TELEGRAM_SEND_RETRY_DELAY_MS * attempt);
+      logger.warn({ chatId, attempt, delayMs }, 'Document send failed; retrying');
+      await sleep(delayMs);
+    }
+  }
+  return { success: false };
+}
+
+async function sendPhoto(
+  chatId: string,
+  filePath: string,
+  options?: { caption?: string; replyToMessageId?: number }
+): Promise<{ success: boolean }> {
+  for (let attempt = 1; attempt <= TELEGRAM_SEND_RETRIES; attempt += 1) {
+    try {
+      const payload: Record<string, unknown> = {};
+      if (options?.caption) payload.caption = options.caption;
+      if (options?.replyToMessageId) {
+        payload.reply_parameters = { message_id: options.replyToMessageId, allow_sending_without_reply: true };
+      }
+      await telegrafBot.telegram.sendPhoto(chatId, { source: filePath }, payload);
+      logger.info({ chatId, filePath }, 'Photo sent');
+      return { success: true };
+    } catch (err) {
+      if (!isRetryableTelegramError(err) || attempt === TELEGRAM_SEND_RETRIES) {
+        logger.error({ chatId, filePath, attempt, err }, 'Failed to send photo');
+        return { success: false };
+      }
+      const retryAfterMs = getTelegramRetryAfterMs(err);
+      const delayMs = retryAfterMs ?? (TELEGRAM_SEND_RETRY_DELAY_MS * attempt);
+      logger.warn({ chatId, attempt, delayMs }, 'Photo send failed; retrying');
+      await sleep(delayMs);
+    }
+  }
+  return { success: false };
+}
+
+async function downloadTelegramFile(
+  fileId: string,
+  groupFolder: string,
+  filename: string
+): Promise<string | null> {
+  let localPath: string | null = null;
+  let tmpPath: string | null = null;
+  try {
+    const fileLink = await telegrafBot.telegram.getFileLink(fileId);
+    const url = fileLink.href || String(fileLink);
+    const abortController = new AbortController();
+    const timeout = setTimeout(() => abortController.abort(), TELEGRAM_FILE_DOWNLOAD_TIMEOUT_MS);
+    let response: Response;
+    try {
+      response = await fetch(url, { signal: abortController.signal });
+    } finally {
+      clearTimeout(timeout);
+    }
+    if (!response.ok) {
+      logger.warn({ fileId, status: response.status }, 'Failed to download Telegram file');
+      return null;
+    }
+    const contentLength = response.headers.get('content-length');
+    const declaredSize = contentLength ? parseInt(contentLength, 10) : NaN;
+    if (Number.isFinite(declaredSize) && declaredSize > TELEGRAM_MAX_ATTACHMENT_BYTES) {
+      logger.warn({ fileId, size: contentLength }, 'Telegram file too large (>20MB)');
+      return null;
+    }
+    const inboxDir = path.join(GROUPS_DIR, groupFolder, 'inbox');
+    fs.mkdirSync(inboxDir, { recursive: true });
+    const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const localName = `${Date.now()}_${safeName}`;
+    localPath = path.join(inboxDir, localName);
+    tmpPath = `${localPath}.tmp`;
+
+    const fileStream = fs.createWriteStream(tmpPath, { flags: 'wx' });
+    let bytesWritten = 0;
+    const body = response.body;
+    if (!body) {
+      throw new Error('Telegram response had no body');
+    }
+    const reader = body.getReader();
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value || value.byteLength === 0) continue;
+        bytesWritten += value.byteLength;
+        if (bytesWritten > TELEGRAM_MAX_ATTACHMENT_BYTES) {
+          await reader.cancel();
+          throw new Error('Telegram file exceeds 20MB size limit');
+        }
+        if (!fileStream.write(Buffer.from(value))) {
+          await new Promise<void>(resolve => fileStream.once('drain', resolve));
+        }
+      }
+      await new Promise<void>((resolve, reject) => {
+        fileStream.end((err?: Error | null) => {
+          if (err) reject(err);
+          else resolve();
+        });
+      });
+    } catch (streamErr) {
+      fileStream.destroy();
+      throw streamErr;
+    }
+
+    fs.renameSync(tmpPath, localPath);
+    tmpPath = null;
+    logger.info({ fileId, localPath, size: bytesWritten }, 'Downloaded Telegram file');
+    return localPath;
+  } catch (err) {
+    logger.error({ fileId, err }, 'Error downloading Telegram file');
+    return null;
+  } finally {
+    if (tmpPath && fs.existsSync(tmpPath)) {
+      try {
+        fs.unlinkSync(tmpPath);
+      } catch {
+        // ignore cleanup failure
+      }
+    }
+    if (localPath && fs.existsSync(localPath) && fs.statSync(localPath).size === 0) {
+      try {
+        fs.unlinkSync(localPath);
+      } catch {
+        // ignore cleanup failure
+      }
+    }
+  }
+}
+
+function buildAttachmentsXml(attachments: MessageAttachment[], groupFolder: string): string {
+  if (!attachments || attachments.length === 0) return '';
+  const escapeXml = (s: string) => s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+  return attachments.map(a => {
+    const attrs: string[] = [`type="${escapeXml(a.type)}"`];
+    const containerPath = a.local_path ? hostPathToContainerPath(a.local_path, groupFolder) : null;
+    if (containerPath) attrs.push(`path="${escapeXml(containerPath)}"`);
+    if (a.file_name) attrs.push(`filename="${escapeXml(a.file_name)}"`);
+    if (a.mime_type) attrs.push(`mime="${escapeXml(a.mime_type)}"`);
+    if (a.file_size) attrs.push(`size="${a.file_size}"`);
+    if (a.duration) attrs.push(`duration="${a.duration}"`);
+    if (a.width) attrs.push(`width="${a.width}"`);
+    if (a.height) attrs.push(`height="${a.height}"`);
+    return `<attachment ${attrs.join(' ')} />`;
+  }).join('\n');
+}
+
+async function sendVoice(
+  chatId: string,
+  filePath: string,
+  options?: { caption?: string; duration?: number; replyToMessageId?: number }
+): Promise<{ success: boolean }> {
+  for (let attempt = 1; attempt <= TELEGRAM_SEND_RETRIES; attempt += 1) {
+    try {
+      const payload: Record<string, unknown> = {};
+      if (options?.caption) payload.caption = options.caption;
+      if (options?.duration) payload.duration = options.duration;
+      if (options?.replyToMessageId) {
+        payload.reply_parameters = { message_id: options.replyToMessageId, allow_sending_without_reply: true };
+      }
+      await telegrafBot.telegram.sendVoice(chatId, { source: filePath }, payload);
+      logger.info({ chatId, filePath }, 'Voice sent');
+      return { success: true };
+    } catch (err) {
+      if (!isRetryableTelegramError(err) || attempt === TELEGRAM_SEND_RETRIES) {
+        logger.error({ chatId, filePath, attempt, err }, 'Failed to send voice');
+        return { success: false };
+      }
+      const retryAfterMs = getTelegramRetryAfterMs(err);
+      const delayMs = retryAfterMs ?? (TELEGRAM_SEND_RETRY_DELAY_MS * attempt);
+      await sleep(delayMs);
+    }
+  }
+  return { success: false };
+}
+
+async function sendAudio(
+  chatId: string,
+  filePath: string,
+  options?: { caption?: string; duration?: number; performer?: string; title?: string; replyToMessageId?: number }
+): Promise<{ success: boolean }> {
+  for (let attempt = 1; attempt <= TELEGRAM_SEND_RETRIES; attempt += 1) {
+    try {
+      const payload: Record<string, unknown> = {};
+      if (options?.caption) payload.caption = options.caption;
+      if (options?.duration) payload.duration = options.duration;
+      if (options?.performer) payload.performer = options.performer;
+      if (options?.title) payload.title = options.title;
+      if (options?.replyToMessageId) {
+        payload.reply_parameters = { message_id: options.replyToMessageId, allow_sending_without_reply: true };
+      }
+      await telegrafBot.telegram.sendAudio(chatId, { source: filePath }, payload);
+      logger.info({ chatId, filePath }, 'Audio sent');
+      return { success: true };
+    } catch (err) {
+      if (!isRetryableTelegramError(err) || attempt === TELEGRAM_SEND_RETRIES) {
+        logger.error({ chatId, filePath, attempt, err }, 'Failed to send audio');
+        return { success: false };
+      }
+      const retryAfterMs = getTelegramRetryAfterMs(err);
+      const delayMs = retryAfterMs ?? (TELEGRAM_SEND_RETRY_DELAY_MS * attempt);
+      await sleep(delayMs);
+    }
+  }
+  return { success: false };
+}
+
+async function sendLocation(
+  chatId: string,
+  latitude: number,
+  longitude: number,
+  options?: { replyToMessageId?: number }
+): Promise<{ success: boolean }> {
+  try {
+    const payload: Record<string, unknown> = {};
+    if (options?.replyToMessageId) {
+      payload.reply_parameters = { message_id: options.replyToMessageId, allow_sending_without_reply: true };
+    }
+    await telegrafBot.telegram.sendLocation(chatId, latitude, longitude, payload);
+    logger.info({ chatId, latitude, longitude }, 'Location sent');
+    return { success: true };
+  } catch (err) {
+    logger.error({ chatId, err }, 'Failed to send location');
+    return { success: false };
+  }
+}
+
+async function sendContact(
+  chatId: string,
+  phoneNumber: string,
+  firstName: string,
+  options?: { lastName?: string; replyToMessageId?: number }
+): Promise<{ success: boolean }> {
+  try {
+    const payload: Record<string, unknown> = {};
+    if (options?.lastName) payload.last_name = options.lastName;
+    if (options?.replyToMessageId) {
+      payload.reply_parameters = { message_id: options.replyToMessageId, allow_sending_without_reply: true };
+    }
+    await telegrafBot.telegram.sendContact(chatId, phoneNumber, firstName, payload);
+    logger.info({ chatId, phoneNumber }, 'Contact sent');
+    return { success: true };
+  } catch (err) {
+    logger.error({ chatId, err }, 'Failed to send contact');
+    return { success: false };
+  }
+}
+
+async function sendPoll(
+  chatId: string,
+  question: string,
+  pollOptions: string[],
+  pollConfig?: { is_anonymous?: boolean; type?: 'regular' | 'quiz'; allows_multiple_answers?: boolean; correct_option_id?: number; replyToMessageId?: number }
+): Promise<{ success: boolean; messageId?: number }> {
+  try {
+    const payload: Record<string, unknown> = {};
+    if (pollConfig?.is_anonymous !== undefined) payload.is_anonymous = pollConfig.is_anonymous;
+    if (pollConfig?.type) payload.type = pollConfig.type;
+    if (pollConfig?.allows_multiple_answers !== undefined) payload.allows_multiple_answers = pollConfig.allows_multiple_answers;
+    if (pollConfig?.correct_option_id !== undefined) payload.correct_option_id = pollConfig.correct_option_id;
+    if (pollConfig?.replyToMessageId) {
+      payload.reply_parameters = { message_id: pollConfig.replyToMessageId, allow_sending_without_reply: true };
+    }
+    const sent = await telegrafBot.telegram.sendPoll(chatId, question, pollOptions, payload);
+    logger.info({ chatId, question }, 'Poll sent');
+    return { success: true, messageId: sent.message_id };
+  } catch (err) {
+    logger.error({ chatId, err }, 'Failed to send poll');
+    return { success: false };
+  }
+}
+
+async function sendInlineKeyboard(
+  chatId: string,
+  text: string,
+  buttons: Array<Array<{ text: string; callback_data?: string; url?: string }>>,
+  options?: { replyToMessageId?: number }
+): Promise<{ success: boolean; messageId?: number }> {
+  try {
+    const payload: Record<string, unknown> = {
+      reply_markup: { inline_keyboard: buttons }
+    };
+    if (options?.replyToMessageId) {
+      payload.reply_parameters = { message_id: options.replyToMessageId, allow_sending_without_reply: true };
+    }
+    const sent = await telegrafBot.telegram.sendMessage(chatId, text, payload);
+    logger.info({ chatId }, 'Inline keyboard sent');
+    return { success: true, messageId: sent.message_id };
+  } catch (err) {
+    logger.error({ chatId, err }, 'Failed to send inline keyboard');
+    return { success: false };
+  }
+}
+
+// ── Callback query store (5-minute TTL for inline button callbacks) ───
+const callbackDataStore = new Map<string, { chatJid: string; data: string; label: string; createdAt: number }>();
+
+function registerCallbackData(chatJid: string, data: string, label: string): string {
+  const id = generateId('cb');
+  callbackDataStore.set(id, { chatJid, data, label, createdAt: Date.now() });
+  return id;
+}
+
+// Clean up expired callback data every 60s
+setInterval(() => {
+  const cutoff = Date.now() - 5 * 60 * 1000;
+  for (const [id, entry] of callbackDataStore) {
+    if (entry.createdAt < cutoff) {
+      callbackDataStore.delete(id);
+    }
+  }
+}, 60_000);
+
+function normalizePollOptions(rawOptions: unknown): string[] | null {
+  if (!Array.isArray(rawOptions)) return null;
+  const options = rawOptions
+    .filter((value): value is string => typeof value === 'string')
+    .map(option => option.trim())
+    .filter(Boolean);
+  if (options.length < 2 || options.length > 10) return null;
+  if (options.some(option => option.length > 100)) return null;
+  if (new Set(options.map(option => option.toLowerCase())).size !== options.length) return null;
+  return options;
+}
+
+function isAllowedInlineButtonUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' || parsed.protocol === 'tg:';
+  } catch {
+    return false;
+  }
+}
+
+type InlineKeyboardButton = { text: string; callback_data?: string; url?: string };
+
+function normalizeInlineKeyboard(rawButtons: unknown): Array<Array<InlineKeyboardButton>> | null {
+  if (!Array.isArray(rawButtons) || rawButtons.length === 0) return null;
+  const rows: Array<Array<InlineKeyboardButton>> = [];
+  for (const rawRow of rawButtons) {
+    if (!Array.isArray(rawRow) || rawRow.length === 0) return null;
+    const row: InlineKeyboardButton[] = [];
+    for (const rawButton of rawRow) {
+      if (!rawButton || typeof rawButton !== 'object') return null;
+      const button = rawButton as Record<string, unknown>;
+      const text = typeof button.text === 'string' ? button.text.trim() : '';
+      const url = typeof button.url === 'string' ? button.url.trim() : '';
+      const callbackData = typeof button.callback_data === 'string' ? button.callback_data : '';
+      const hasUrl = url.length > 0;
+      const hasCallback = callbackData.length > 0;
+      if (!text || hasUrl === hasCallback) return null;
+      if (hasUrl && !isAllowedInlineButtonUrl(url)) return null;
+      if (hasCallback && callbackData.length > 64) return null;
+      if (hasUrl) row.push({ text, url });
+      else row.push({ text, callback_data: callbackData });
+    }
+    rows.push(row);
+  }
+  return rows;
 }
 
 class RetryableMessageProcessingError extends Error {
@@ -586,7 +986,7 @@ function computeMessageQueueRetryDelayMs(attempt: number): number {
 async function sendMessageForQueue(
   chatId: string,
   text: string,
-  options?: { messageThreadId?: number; parseMode?: string | null }
+  options?: { messageThreadId?: number; parseMode?: string | null; replyToMessageId?: number }
 ): Promise<{ success: true; messageId?: string }> {
   const result = await sendMessage(chatId, text, options);
   if (!result.success) {
@@ -605,6 +1005,7 @@ interface TelegramMessage {
   isGroup: boolean;
   chatType: string;
   messageThreadId?: number;
+  attachments?: MessageAttachment[];
 }
 
 function enqueueMessage(msg: TelegramMessage): void {
@@ -723,19 +1124,29 @@ async function processMessage(msg: TelegramMessage): Promise<boolean> {
     chatState?.last_agent_timestamp || null,
     chatState?.last_agent_message_id || null
   );
-  missedMessages = missedMessages.filter(m =>
-    m.timestamp < msg.timestamp ||
-    (m.timestamp === msg.timestamp && m.id <= msg.messageId)
-  );
+  const triggerMessageId = Number.parseInt(msg.messageId, 10);
+  missedMessages = missedMessages.filter((message) => {
+    if (message.timestamp < msg.timestamp) return true;
+    if (message.timestamp !== msg.timestamp) return false;
+    const numericId = Number.parseInt(message.id, 10);
+    if (Number.isFinite(triggerMessageId) && Number.isFinite(numericId)) {
+      return numericId <= triggerMessageId;
+    }
+    return message.id <= msg.messageId;
+  });
   if (missedMessages.length === 0) {
     logger.warn({ chatId: msg.chatId }, 'No missed messages found; falling back to current message');
+    const fallbackAttachments = msg.attachments && msg.attachments.length > 0
+      ? JSON.stringify(msg.attachments)
+      : null;
     missedMessages = [{
       id: msg.messageId,
       chat_jid: msg.chatId,
       sender: msg.senderId,
       sender_name: msg.senderName,
       content: msg.content,
-      timestamp: msg.timestamp
+      timestamp: msg.timestamp,
+      attachments_json: fallbackAttachments
     }];
   }
 
@@ -747,12 +1158,52 @@ async function processMessage(msg: TelegramMessage): Promise<boolean> {
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;');
     const safeContent = clampInputMessage(m.content, INPUT_MESSAGE_MAX_CHARS);
-    return `<message sender="${escapeXml(m.sender_name)}" sender_id="${escapeXml(m.sender)}" time="${m.timestamp}">${escapeXml(safeContent)}</message>`;
+    // Parse attachments from DB JSON if present
+    let attachments: MessageAttachment[] = [];
+    if (m.attachments_json) {
+      try { attachments = JSON.parse(m.attachments_json); } catch { /* ignore */ }
+    }
+    const attachmentXml = buildAttachmentsXml(attachments, group.folder);
+    const inner = attachmentXml
+      ? `${escapeXml(safeContent)}\n${attachmentXml}`
+      : escapeXml(safeContent);
+    return `<message sender="${escapeXml(m.sender_name)}" sender_id="${escapeXml(m.sender)}" time="${m.timestamp}">${inner}</message>`;
   });
   const prompt = `<messages>
 ${lines.join('\n')}
 </messages>`;
   const lastMessage = missedMessages[missedMessages.length - 1];
+  const parsedReplyToMessageId = Number.parseInt(msg.messageId, 10);
+  const replyToMessageId = Number.isFinite(parsedReplyToMessageId) ? parsedReplyToMessageId : undefined;
+  const containerAttachments = (() => {
+    for (let idx = missedMessages.length - 1; idx >= 0; idx -= 1) {
+      const raw = missedMessages[idx].attachments_json;
+      if (!raw) continue;
+      try {
+        const parsed = JSON.parse(raw) as MessageAttachment[];
+        if (!Array.isArray(parsed) || parsed.length === 0) continue;
+        const mapped = parsed.flatMap(attachment => {
+          if (!attachment?.local_path) return [];
+          const containerPath = hostPathToContainerPath(attachment.local_path, group.folder);
+          if (!containerPath) return [];
+          return [{
+            type: attachment.type,
+            path: containerPath,
+            file_name: attachment.file_name,
+            mime_type: attachment.mime_type,
+            file_size: attachment.file_size,
+            duration: attachment.duration,
+            width: attachment.width,
+            height: attachment.height
+          }];
+        });
+        if (mapped.length > 0) return mapped;
+      } catch {
+        // ignore malformed attachment payloads
+      }
+    }
+    return undefined;
+  })();
 
   const routingStartedAt = Date.now();
   const routingDecision = routeRequest({
@@ -858,7 +1309,7 @@ ${lines.join('\n')}
     await sendMessageForQueue(
       msg.chatId,
       `Queued this as background job ${result.jobId}. I'll report back when it's done. You can keep chatting while it runs.${queueLine}${etaLine}${detailLine}${planLine}`,
-      { messageThreadId: msg.messageThreadId }
+      { messageThreadId: msg.messageThreadId, replyToMessageId }
     );
 
     updateChatState(msg.chatId, msg.timestamp, msg.messageId);
@@ -939,6 +1390,9 @@ ${lines.join('\n')}
       logger.warn({ chatId: msg.chatId, err }, 'Background job classifier failed');
     }
   }
+
+  // Refresh typing indicator every 4s (Telegram expires it after ~5s)
+  const typingInterval = setInterval(() => { void setTyping(msg.chatId); }, 4_000);
 
   const predictedStage = inferProgressStage({
     content: lastMessage?.content || prompt,
@@ -1031,6 +1485,7 @@ ${lines.join('\n')}
       disableResponseValidation: !routingDecision.enableResponseValidation,
       responseValidationMaxRetries: routingDecision.responseValidationMaxRetries,
       disableMemoryExtraction: !routingDecision.enableMemoryExtraction,
+      attachments: containerAttachments,
       abortSignal: abortController.signal,
       timeoutMs: AUTO_SPAWN_ENABLED && AUTO_SPAWN_FOREGROUND_TIMEOUT_MS > 0
         ? AUTO_SPAWN_FOREGROUND_TIMEOUT_MS
@@ -1052,6 +1507,7 @@ ${lines.join('\n')}
     }
     logger.error({ group: group.name, err }, 'Agent error');
   } finally {
+    clearInterval(typingInterval);
     progressManager.stop();
     activeRuns.delete(msg.chatId);
   }
@@ -1098,7 +1554,7 @@ ${lines.join('\n')}
       }
     }
     const userMessage = humanizeError(errorMessage || 'Unknown error');
-    await sendMessageForQueue(msg.chatId, userMessage, { messageThreadId: msg.messageThreadId });
+    await sendMessageForQueue(msg.chatId, userMessage, { messageThreadId: msg.messageThreadId, replyToMessageId });
     return false;
   }
 
@@ -1124,14 +1580,14 @@ ${lines.join('\n')}
       }
     }
     const userMessage = humanizeError(errorText);
-    await sendMessageForQueue(msg.chatId, userMessage, { messageThreadId: msg.messageThreadId });
+    await sendMessageForQueue(msg.chatId, userMessage, { messageThreadId: msg.messageThreadId, replyToMessageId });
     return false;
   }
 
   updateChatState(msg.chatId, msg.timestamp, msg.messageId);
 
   if (output.result && output.result.trim()) {
-    const sendResult = await sendMessageForQueue(msg.chatId, output.result, { messageThreadId: msg.messageThreadId });
+    const sendResult = await sendMessageForQueue(msg.chatId, output.result, { messageThreadId: msg.messageThreadId, replyToMessageId });
     const sentMessageId = sendResult.messageId;
     // Link the sent message to the trace for feedback tracking
     if (sentMessageId) {
@@ -1162,11 +1618,11 @@ ${lines.join('\n')}
     await sendMessageForQueue(
       msg.chatId,
       'I hit my tool-call step limit before I could finish. If you want me to keep going, please narrow the scope or ask for a specific subtask.',
-      { messageThreadId: msg.messageThreadId }
+      { messageThreadId: msg.messageThreadId, replyToMessageId }
     );
   } else {
     logger.warn({ chatId: msg.chatId }, 'Agent returned empty/whitespace response');
-    await sendMessageForQueue(msg.chatId, "I wasn't able to generate a response. Please try rephrasing your message.", { messageThreadId: msg.messageThreadId });
+    await sendMessageForQueue(msg.chatId, "I wasn't able to generate a response. Please try rephrasing your message.", { messageThreadId: msg.messageThreadId, replyToMessageId });
   }
 
   if (context) {
@@ -1207,24 +1663,30 @@ function startIpcWatcher(): void {
   ipcStopped = false;
   let processing = false;
   let scheduled = false;
+  let rerunRequested = false;
 
   const processIpcFiles = async () => {
-    if (processing) return;
-    processing = true;
-    try {
-    // Scan all group IPC directories (identity determined by directory)
-    let groupFolders: string[];
-    try {
-      groupFolders = fs.readdirSync(ipcBaseDir).filter(f => {
-        const stat = fs.statSync(path.join(ipcBaseDir, f));
-        return stat.isDirectory() && f !== 'errors';
-      });
-    } catch (err) {
-      logger.error({ err }, 'Error reading IPC base directory');
+    if (processing) {
+      rerunRequested = true;
       return;
     }
+    processing = true;
+    try {
+      do {
+        rerunRequested = false;
+        // Scan all group IPC directories (identity determined by directory)
+        let groupFolders: string[];
+        try {
+          groupFolders = fs.readdirSync(ipcBaseDir).filter(f => {
+            const stat = fs.statSync(path.join(ipcBaseDir, f));
+            return stat.isDirectory() && f !== 'errors';
+          });
+        } catch (err) {
+          logger.error({ err }, 'Error reading IPC base directory');
+          return;
+        }
 
-    for (const sourceGroup of groupFolders) {
+        for (const sourceGroup of groupFolders) {
       const isMain = sourceGroup === MAIN_GROUP_FOLDER;
       const messagesDir = path.join(ipcBaseDir, sourceGroup, 'messages');
       const tasksDir = path.join(ipcBaseDir, sourceGroup, 'tasks');
@@ -1239,14 +1701,148 @@ function startIpcWatcher(): void {
             const filePath = path.join(messagesDir, file);
             try {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-              if (data.type === 'message' && data.chatJid && data.text) {
-                // Authorization: verify this group can send to this chatJid
-                const targetGroup = registeredGroups[data.chatJid];
-                if (isMain || (targetGroup && targetGroup.folder === sourceGroup)) {
-                  await sendMessage(data.chatJid, data.text);
-                  logger.info({ chatJid: data.chatJid, sourceGroup }, 'IPC message sent');
+              const chatJid = data.chatJid;
+              const targetGroup = chatJid ? registeredGroups[chatJid] : undefined;
+              const isAuthorized = chatJid && (isMain || (targetGroup && targetGroup.folder === sourceGroup));
+
+              const rawReplyTo = typeof data.reply_to_message_id === 'number'
+                ? Math.trunc(data.reply_to_message_id)
+                : NaN;
+              const replyTo = Number.isInteger(rawReplyTo) && rawReplyTo > 0
+                ? rawReplyTo
+                : undefined;
+
+              const messageText = typeof data.text === 'string' ? data.text.trim() : '';
+              if (data.type === 'message' && chatJid && messageText) {
+                if (isAuthorized) {
+                  await sendMessage(chatJid, messageText, { replyToMessageId: replyTo });
+                  logger.info({ chatJid, sourceGroup }, 'IPC message sent');
                 } else {
-                  logger.warn({ chatJid: data.chatJid, sourceGroup }, 'Unauthorized IPC message attempt blocked');
+                  logger.warn({ chatJid, sourceGroup }, 'Unauthorized IPC message attempt blocked');
+                }
+              } else if ((data.type === 'send_file' || data.type === 'send_photo') && chatJid && data.path) {
+                if (isAuthorized) {
+                  const hostPath = resolveContainerPathToHost(data.path, sourceGroup);
+                  if (hostPath && fs.existsSync(hostPath)) {
+                    const caption = typeof data.caption === 'string' ? data.caption : undefined;
+                    if (data.type === 'send_photo') {
+                      await sendPhoto(chatJid, hostPath, { caption, replyToMessageId: replyTo });
+                    } else {
+                      await sendDocument(chatJid, hostPath, { caption, replyToMessageId: replyTo });
+                    }
+                    logger.info({ chatJid, sourceGroup, type: data.type, path: data.path }, 'IPC file sent');
+                  } else {
+                    logger.warn({ chatJid, sourceGroup, path: data.path, hostPath }, 'IPC file not found or path not resolvable');
+                  }
+                } else {
+                  logger.warn({ chatJid, sourceGroup }, 'Unauthorized IPC file send attempt blocked');
+                }
+              } else if ((data.type === 'send_voice' || data.type === 'send_audio') && chatJid && data.path) {
+                if (isAuthorized) {
+                  const hostPath = resolveContainerPathToHost(data.path, sourceGroup);
+                  if (hostPath && fs.existsSync(hostPath)) {
+                    const caption = typeof data.caption === 'string' ? data.caption : undefined;
+                    const duration = typeof data.duration === 'number' ? data.duration : undefined;
+                    if (data.type === 'send_voice') {
+                      await sendVoice(chatJid, hostPath, { caption, duration, replyToMessageId: replyTo });
+                    } else {
+                      const performer = typeof data.performer === 'string' ? data.performer : undefined;
+                      const title = typeof data.title === 'string' ? data.title : undefined;
+                      await sendAudio(chatJid, hostPath, { caption, duration, performer, title, replyToMessageId: replyTo });
+                    }
+                    logger.info({ chatJid, sourceGroup, type: data.type }, 'IPC audio/voice sent');
+                  } else {
+                    logger.warn({ chatJid, sourceGroup, path: data.path }, 'IPC audio file not found');
+                  }
+                } else {
+                  logger.warn({ chatJid, sourceGroup }, 'Unauthorized IPC audio send blocked');
+                }
+              } else if (data.type === 'send_location' && chatJid) {
+                if (isAuthorized) {
+                  const lat = typeof data.latitude === 'number' ? data.latitude : NaN;
+                  const lng = typeof data.longitude === 'number' ? data.longitude : NaN;
+                  if (
+                    Number.isFinite(lat)
+                    && Number.isFinite(lng)
+                    && lat >= -90
+                    && lat <= 90
+                    && lng >= -180
+                    && lng <= 180
+                  ) {
+                    await sendLocation(chatJid, lat, lng, { replyToMessageId: replyTo });
+                    logger.info({ chatJid, sourceGroup }, 'IPC location sent');
+                  } else {
+                    logger.warn({ chatJid, sourceGroup }, 'Invalid location coordinates');
+                  }
+                } else {
+                  logger.warn({ chatJid, sourceGroup }, 'Unauthorized IPC location send blocked');
+                }
+              } else if (data.type === 'send_contact' && chatJid) {
+                if (isAuthorized) {
+                  const phone = typeof data.phone_number === 'string' ? data.phone_number.trim() : '';
+                  const firstName = typeof data.first_name === 'string' ? data.first_name.trim() : '';
+                  const lastName = typeof data.last_name === 'string' ? data.last_name.trim() : undefined;
+                  if (phone && firstName) {
+                    await sendContact(chatJid, phone, firstName, { lastName, replyToMessageId: replyTo });
+                    logger.info({ chatJid, sourceGroup }, 'IPC contact sent');
+                  } else {
+                    logger.warn({ chatJid, sourceGroup }, 'Invalid contact (phone/name missing)');
+                  }
+                } else {
+                  logger.warn({ chatJid, sourceGroup }, 'Unauthorized IPC contact send blocked');
+                }
+              } else if (data.type === 'send_poll' && chatJid) {
+                if (isAuthorized) {
+                  const question = typeof data.question === 'string' ? data.question.trim() : '';
+                  const options = normalizePollOptions(data.options);
+                  const pollType = data.poll_type === 'quiz' ? 'quiz' : 'regular';
+                  const allowsMultipleAnswers = typeof data.allows_multiple_answers === 'boolean'
+                    ? data.allows_multiple_answers
+                    : undefined;
+                  const rawCorrectOptionId = typeof data.correct_option_id === 'number' ? Math.trunc(data.correct_option_id) : undefined;
+                  const hasValidCorrectOption = rawCorrectOptionId !== undefined
+                    && options !== null
+                    && rawCorrectOptionId >= 0
+                    && rawCorrectOptionId < options.length;
+                  const invalidQuizConfig = pollType === 'quiz' && allowsMultipleAnswers;
+                  const unexpectedCorrectOption = pollType !== 'quiz' && rawCorrectOptionId !== undefined;
+                  if (question && question.length <= 300 && options && !invalidQuizConfig && !unexpectedCorrectOption && (rawCorrectOptionId === undefined || hasValidCorrectOption)) {
+                    await sendPoll(chatJid, question, options, {
+                      is_anonymous: typeof data.is_anonymous === 'boolean' ? data.is_anonymous : undefined,
+                      type: pollType,
+                      allows_multiple_answers: allowsMultipleAnswers,
+                      correct_option_id: pollType === 'quiz' ? rawCorrectOptionId : undefined,
+                      replyToMessageId: replyTo
+                    });
+                    logger.info({ chatJid, sourceGroup }, 'IPC poll sent');
+                  } else {
+                    logger.warn({ chatJid, sourceGroup }, 'Invalid poll payload');
+                  }
+                } else {
+                  logger.warn({ chatJid, sourceGroup }, 'Unauthorized IPC poll send blocked');
+                }
+              } else if (data.type === 'send_buttons' && chatJid) {
+                if (isAuthorized) {
+                  const text = typeof data.text === 'string' ? data.text.trim() : '';
+                  const normalizedButtons = normalizeInlineKeyboard(data.buttons);
+                  if (text && normalizedButtons) {
+                    // Register callback data and replace with IDs
+                    const buttons = normalizedButtons.map(row =>
+                      row.map(btn => {
+                        if (btn.callback_data && !btn.url) {
+                          const cbId = registerCallbackData(chatJid, btn.callback_data, btn.text);
+                          return { text: btn.text, callback_data: cbId };
+                        }
+                        return btn;
+                      })
+                    );
+                    await sendInlineKeyboard(chatJid, text, buttons, { replyToMessageId: replyTo });
+                    logger.info({ chatJid, sourceGroup }, 'IPC buttons sent');
+                  } else {
+                    logger.warn({ chatJid, sourceGroup }, 'Invalid buttons message');
+                  }
+                } else {
+                  logger.warn({ chatJid, sourceGroup }, 'Unauthorized IPC buttons send blocked');
                 }
               }
               fs.unlinkSync(filePath);
@@ -1313,7 +1909,8 @@ function startIpcWatcher(): void {
       } catch (err) {
         logger.error({ err, sourceGroup }, 'Error reading IPC requests directory');
       }
-    }
+        }
+      } while (rerunRequested && !ipcStopped);
 
     } finally {
       processing = false;
@@ -1321,7 +1918,12 @@ function startIpcWatcher(): void {
   };
 
   const scheduleProcess = () => {
-    if (scheduled || ipcStopped) return;
+    if (ipcStopped) return;
+    if (processing) {
+      rerunRequested = true;
+      return;
+    }
+    if (scheduled) return;
     scheduled = true;
     setTimeout(async () => {
       scheduled = false;
@@ -2004,6 +2606,39 @@ async function processRequestIpc(
         }
         return { id: requestId, ok: result.ok, error: result.error };
       }
+      case 'edit_message': {
+        const messageId = typeof payload.message_id === 'number' ? payload.message_id : parseInt(String(payload.message_id), 10);
+        const text = typeof payload.text === 'string' ? payload.text.trim() : '';
+        const chatJid = typeof payload.chat_jid === 'string' ? payload.chat_jid : '';
+        if (!Number.isFinite(messageId) || !text || !chatJid) {
+          return { id: requestId, ok: false, error: 'message_id, text, and chat_jid are required.' };
+        }
+        const group = Object.entries(registeredGroups).find(([id]) => id === chatJid);
+        if (!group) {
+          return { id: requestId, ok: false, error: 'Chat not registered.' };
+        }
+        if (!isMain && group[1].folder !== sourceGroup) {
+          return { id: requestId, ok: false, error: 'Unauthorized edit_message attempt.' };
+        }
+        await telegrafBot.telegram.editMessageText(chatJid, messageId, undefined, text);
+        return { id: requestId, ok: true, result: { edited: true } };
+      }
+      case 'delete_message': {
+        const messageId = typeof payload.message_id === 'number' ? payload.message_id : parseInt(String(payload.message_id), 10);
+        const chatJid = typeof payload.chat_jid === 'string' ? payload.chat_jid : '';
+        if (!Number.isFinite(messageId) || !chatJid) {
+          return { id: requestId, ok: false, error: 'message_id and chat_jid are required.' };
+        }
+        const group = Object.entries(registeredGroups).find(([id]) => id === chatJid);
+        if (!group) {
+          return { id: requestId, ok: false, error: 'Chat not registered.' };
+        }
+        if (!isMain && group[1].folder !== sourceGroup) {
+          return { id: requestId, ok: false, error: 'Unauthorized delete_message attempt.' };
+        }
+        await telegrafBot.telegram.deleteMessage(chatJid, messageId);
+        return { id: requestId, ok: true, result: { deleted: true } };
+      }
       default:
         return { id: requestId, ok: false, error: `Unknown request type: ${data.type}` };
     }
@@ -2326,24 +2961,150 @@ function setupTelegramHandlers(): void {
     }
   });
 
-  // Handle all text messages
-  telegrafBot.on('message', async (ctx) => {
-    if (!ctx.message || !('text' in ctx.message)) {
-      // Acknowledge media messages with a brief reply
-      if (ctx.message && ('photo' in ctx.message || 'document' in ctx.message || 'voice' in ctx.message || 'video' in ctx.message)) {
-        try {
-          const chatId = String(ctx.chat.id);
-          const rawThreadId = (ctx.message as { message_thread_id?: number }).message_thread_id;
-          const messageThreadId = Number.isFinite(rawThreadId) ? Number(rawThreadId) : undefined;
-          await sendMessage(chatId, 'I can only process text messages right now.', { messageThreadId });
-        } catch {
-          // Ignore send failures for media acknowledgment
-        }
+  // Handle callback queries from inline keyboard buttons
+  telegrafBot.on('callback_query', async (ctx) => {
+    try {
+      const cbQuery = ctx.callbackQuery;
+      if (!cbQuery || !('data' in cbQuery) || !cbQuery.data) return;
+      const callbackId = cbQuery.data;
+      const entry = callbackDataStore.get(callbackId);
+      await ctx.answerCbQuery();
+      if (!entry) {
+        logger.debug({ callbackId }, 'Unknown callback data');
+        return;
       }
+      callbackDataStore.delete(callbackId);
+      const callbackChatId = ctx.chat?.id ? String(ctx.chat.id) : '';
+      if (callbackChatId && callbackChatId !== entry.chatJid) {
+        logger.warn({ callbackChatId, expectedChatId: entry.chatJid }, 'Callback chat mismatch; ignoring callback');
+        return;
+      }
+      const chatId = callbackChatId || entry.chatJid;
+      const senderId = String(cbQuery.from?.id || '');
+      const senderName = cbQuery.from?.first_name || cbQuery.from?.username || 'User';
+      const timestamp = new Date().toISOString();
+      const syntheticMessageId = String((Date.now() * 1000) + Math.floor(Math.random() * 1000));
+      const group = registeredGroups[chatId];
+      if (!group) return;
+      const chatType = ctx.chat?.type || 'private';
+      const isGroup = chatType === 'group' || chatType === 'supergroup';
+      const rawThreadId = typeof cbQuery.message === 'object' && cbQuery.message && 'message_thread_id' in cbQuery.message
+        ? (cbQuery.message as { message_thread_id?: number }).message_thread_id
+        : undefined;
+      const messageThreadId = Number.isFinite(rawThreadId) ? Number(rawThreadId) : undefined;
+      const syntheticContent = `[Button clicked: "${entry.label}"] callback_data: ${entry.data}`;
+      upsertChat({ chatId, lastMessageTime: timestamp });
+      storeMessage(syntheticMessageId, chatId, senderId, senderName, syntheticContent, timestamp, false);
+      enqueueMessage({
+        chatId,
+        messageId: syntheticMessageId,
+        senderId,
+        senderName,
+        content: syntheticContent,
+        timestamp,
+        isGroup,
+        chatType,
+        messageThreadId
+      });
+    } catch (err) {
+      logger.debug({ err }, 'Error handling callback query');
+    }
+  });
+
+  // Handle all messages (text + media)
+  telegrafBot.on('message', async (ctx) => {
+    if (!ctx.message) return;
+
+    const msg = ctx.message as unknown as Record<string, unknown>;
+    // Extract content from text or caption
+    const content = (typeof msg.text === 'string' ? msg.text : '')
+      || (typeof msg.caption === 'string' ? msg.caption : '');
+
+    // Build attachment metadata (downloaded lazily only when processing is triggered)
+    const attachments: MessageAttachment[] = [];
+    const chatId = String(ctx.chat.id);
+    const group = registeredGroups[chatId];
+    const groupFolder = group?.folder;
+    const messageId = String((msg as { message_id: number }).message_id);
+
+    if (Array.isArray(msg.photo) && (msg.photo as Array<Record<string, unknown>>).length > 0) {
+      const photos = msg.photo as Array<{ file_id: string; file_unique_id: string; width?: number; height?: number; file_size?: number }>;
+      const largest = photos[photos.length - 1];
+      const filename = `photo_${messageId}.jpg`;
+      attachments.push({
+        type: 'photo',
+        file_id: largest.file_id,
+        file_unique_id: largest.file_unique_id,
+        file_name: filename,
+        mime_type: 'image/jpeg',
+        file_size: largest.file_size,
+        width: largest.width,
+        height: largest.height
+      });
+    }
+
+    if (msg.document && typeof msg.document === 'object') {
+      const doc = msg.document as { file_id: string; file_unique_id: string; file_name?: string; mime_type?: string; file_size?: number };
+      const filename = doc.file_name || `document_${messageId}`;
+      attachments.push({
+        type: 'document',
+        file_id: doc.file_id,
+        file_unique_id: doc.file_unique_id,
+        file_name: filename,
+        mime_type: doc.mime_type,
+        file_size: doc.file_size
+      });
+    }
+
+    if (msg.voice && typeof msg.voice === 'object') {
+      const voice = msg.voice as { file_id: string; file_unique_id: string; duration?: number; mime_type?: string; file_size?: number };
+      const filename = `voice_${messageId}.ogg`;
+      attachments.push({
+        type: 'voice',
+        file_id: voice.file_id,
+        file_unique_id: voice.file_unique_id,
+        file_name: filename,
+        mime_type: voice.mime_type || 'audio/ogg',
+        file_size: voice.file_size,
+        duration: voice.duration
+      });
+    }
+
+    if (msg.video && typeof msg.video === 'object') {
+      const video = msg.video as { file_id: string; file_unique_id: string; file_name?: string; mime_type?: string; file_size?: number; duration?: number; width?: number; height?: number };
+      const filename = video.file_name || `video_${messageId}.mp4`;
+      attachments.push({
+        type: 'video',
+        file_id: video.file_id,
+        file_unique_id: video.file_unique_id,
+        file_name: filename,
+        mime_type: video.mime_type,
+        file_size: video.file_size,
+        duration: video.duration,
+        width: video.width,
+        height: video.height
+      });
+    }
+
+    if (msg.audio && typeof msg.audio === 'object') {
+      const audio = msg.audio as { file_id: string; file_unique_id: string; file_name?: string; mime_type?: string; file_size?: number; duration?: number };
+      const filename = audio.file_name || `audio_${messageId}.mp3`;
+      attachments.push({
+        type: 'audio',
+        file_id: audio.file_id,
+        file_unique_id: audio.file_unique_id,
+        file_name: filename,
+        mime_type: audio.mime_type,
+        file_size: audio.file_size,
+        duration: audio.duration
+      });
+    }
+
+    // Skip messages with no text content AND no attachments (stickers, etc.)
+    if (!content && attachments.length === 0) {
       return;
     }
 
-    const chatId = String(ctx.chat.id);
     const chatType = ctx.chat.type;
     const isGroup = chatType === 'group' || chatType === 'supergroup';
     const isPrivate = chatType === 'private';
@@ -2354,25 +3115,26 @@ function setupTelegramHandlers(): void {
       || ctx.from?.first_name
       || ctx.from?.username
       || senderName;
-    const content = ctx.message.text;
-    const timestamp = new Date(ctx.message.date * 1000).toISOString();
-    const messageId = String(ctx.message.message_id);
-    const rawThreadId = (ctx.message as { message_thread_id?: number }).message_thread_id;
+    const timestamp = new Date((msg as { date: number }).date * 1000).toISOString();
+    const rawThreadId = (msg as { message_thread_id?: number }).message_thread_id;
     const messageThreadId = Number.isFinite(rawThreadId) ? Number(rawThreadId) : undefined;
 
-    logger.info({ chatId, isGroup, senderName }, `Telegram message: ${content.substring(0, 50)}...`);
+    const storedContent = content || `[${attachments.map(a => a.type).join(', ')}]`;
+    const logContent = storedContent;
+    logger.info({ chatId, isGroup, senderName }, `Telegram message: ${logContent.substring(0, 50)}...`);
 
     try {
       // Store message in database
       upsertChat({ chatId, name: chatName, lastMessageTime: timestamp });
       storeMessage(
-        String(ctx.message.message_id),
+        messageId,
         chatId,
         senderId,
         senderName,
-        content,
+        storedContent,
         timestamp,
-        false
+        false,
+        attachments.length > 0 ? attachments : undefined
       );
     } catch (error) {
       logger.error({ error, chatId }, 'Failed to persist Telegram message');
@@ -2380,23 +3142,26 @@ function setupTelegramHandlers(): void {
 
     const botUsername = ctx.me;
     const botId = ctx.botInfo?.id;
-    const adminHandled = await handleAdminCommand({
-      chatId,
-      senderId,
-      senderName,
-      content,
-      botUsername,
-      messageThreadId
-    });
-    if (adminHandled) {
-      return;
+    // Admin commands only apply to text messages
+    if (content) {
+      const adminHandled = await handleAdminCommand({
+        chatId,
+        senderId,
+        senderName,
+        content,
+        botUsername,
+        messageThreadId
+      });
+      if (adminHandled) {
+        return;
+      }
     }
 
-    const mentioned = isBotMentioned(content, ctx.message.entities, botUsername, botId);
-    const replied = isBotReplied(ctx.message, botId);
-    const group = registeredGroups[chatId];
+    const entities = 'entities' in msg ? (msg.entities as Array<{ type: string; offset: number; length: number }>) : undefined;
+    const mentioned = content ? isBotMentioned(content, entities, botUsername, botId) : false;
+    const replied = isBotReplied(ctx.message as unknown as Record<string, unknown>, botId);
     const triggerRegex = isGroup && group?.trigger ? buildTriggerRegex(group.trigger) : null;
-    const triggered = Boolean(triggerRegex && triggerRegex.test(content));
+    const triggered = Boolean(triggerRegex && content && triggerRegex.test(content));
     const shouldProcess = isPrivate || mentioned || replied || triggered;
 
     if (!shouldProcess) {
@@ -2412,16 +3177,45 @@ function setupTelegramHandlers(): void {
       return;
     }
 
+    if (attachments.length > 0 && groupFolder) {
+      let downloadedAny = false;
+      for (const attachment of attachments) {
+        const filename = attachment.file_name || `${attachment.type}_${messageId}`;
+        const downloaded = await downloadTelegramFile(attachment.file_id, groupFolder, filename);
+        if (downloaded) {
+          attachment.local_path = downloaded;
+          downloadedAny = true;
+        }
+      }
+      if (downloadedAny) {
+        try {
+          storeMessage(
+            messageId,
+            chatId,
+            senderId,
+            senderName,
+            storedContent,
+            timestamp,
+            false,
+            attachments
+          );
+        } catch (error) {
+          logger.error({ error, chatId }, 'Failed to persist downloaded attachment paths');
+        }
+      }
+    }
+
     enqueueMessage({
       chatId,
       messageId,
       senderId,
       senderName,
-      content,
+      content: storedContent,
       timestamp,
       isGroup,
       chatType,
-      messageThreadId
+      messageThreadId,
+      attachments: attachments.length > 0 ? attachments : undefined
     });
   });
 }
@@ -2447,6 +3241,19 @@ function ensureDockerRunning(): void {
 }
 
 async function main(): Promise<void> {
+  // Global error handlers — keep the process alive on unexpected errors
+  process.on('unhandledRejection', (reason) => {
+    logger.error({ err: reason }, 'Unhandled promise rejection');
+  });
+  process.on('uncaughtException', (err) => {
+    logger.error({ err }, 'Uncaught exception');
+    // Only exit for fatal system errors (out of memory, etc.)
+    if (err instanceof RangeError || err instanceof TypeError) {
+      logger.error('Fatal uncaught exception — exiting');
+      process.exit(1);
+    }
+  });
+
   // Ensure directory structure exists before anything else
   const { ensureDirectoryStructure } = await import('./paths.js');
   ensureDirectoryStructure();
@@ -2486,6 +3293,9 @@ async function main(): Promise<void> {
     logger.info({ expiredMemories }, 'Expired memories cleaned up');
   }
   logger.info('Database initialized');
+  if (CONTAINER_PRIVILEGED) {
+    logger.warn('Container privileged mode is enabled by default; agent containers run as root.');
+  }
   startMetricsServer();
   loadState();
 

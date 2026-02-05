@@ -13,6 +13,7 @@ import {
   CONTAINER_PIDS_LIMIT,
   CONTAINER_MEMORY,
   CONTAINER_CPUS,
+  CONTAINER_PRIVILEGED,
   CONTAINER_READONLY_ROOT,
   CONTAINER_TMPFS_SIZE,
   CONTAINER_RUN_UID,
@@ -279,9 +280,13 @@ function buildVolumeMounts(group: RegisteredGroup, isMain: boolean): VolumeMount
 function buildContainerArgs(mounts: VolumeMount[], cidFile?: string): string[] {
   const args: string[] = ['run', '-i', '--rm'];
 
-  // Security hardening
-  args.push('--cap-drop=ALL');
-  args.push('--security-opt=no-new-privileges');
+  // Privileged mode is intentionally default for full agent command capability.
+  if (CONTAINER_PRIVILEGED) {
+    args.push('--privileged');
+  } else {
+    args.push('--cap-drop=ALL');
+    args.push('--cap-add=CHOWN', '--cap-add=DAC_OVERRIDE', '--cap-add=FOWNER', '--cap-add=SETUID', '--cap-add=SETGID');
+  }
   args.push(`--pids-limit=${CONTAINER_PIDS_LIMIT}`);
   if (cidFile) {
     args.push('--cidfile', cidFile);
@@ -289,10 +294,12 @@ function buildContainerArgs(mounts: VolumeMount[], cidFile?: string): string[] {
 
   const runUid = CONTAINER_RUN_UID ? CONTAINER_RUN_UID.trim() : '';
   const runGid = CONTAINER_RUN_GID ? CONTAINER_RUN_GID.trim() : '';
-  if (runUid) {
+  if (CONTAINER_PRIVILEGED) {
+    args.push('--user', '0:0');
+  } else if (runUid) {
     args.push('--user', runGid ? `${runUid}:${runGid}` : runUid);
   }
-  args.push('--env', 'HOME=/tmp');
+  args.push('--env', CONTAINER_PRIVILEGED ? 'HOME=/root' : 'HOME=/tmp');
 
   if (CONTAINER_MEMORY) {
     args.push(`--memory=${CONTAINER_MEMORY}`);
@@ -302,11 +309,16 @@ function buildContainerArgs(mounts: VolumeMount[], cidFile?: string): string[] {
   }
   if (CONTAINER_READONLY_ROOT) {
     args.push('--read-only');
-    const tmpfsOptions = ['rw', 'noexec', 'nosuid', `size=${CONTAINER_TMPFS_SIZE}`];
+    const tmpfsOptions = ['rw', 'nosuid', `size=${CONTAINER_TMPFS_SIZE}`];
     if (runUid) tmpfsOptions.push(`uid=${runUid}`);
     if (runGid) tmpfsOptions.push(`gid=${runGid}`);
     args.push('--tmpfs', `/tmp:${tmpfsOptions.join(',')}`);
     args.push('--tmpfs', `/home/node:${tmpfsOptions.join(',')}`);
+    // Writable overlays for package management (apt-get / dpkg)
+    args.push('--tmpfs', `/var/lib/dpkg:${tmpfsOptions.join(',')}`);
+    args.push('--tmpfs', `/var/cache/apt:${tmpfsOptions.join(',')}`);
+    args.push('--tmpfs', `/var/lib/apt:${tmpfsOptions.join(',')}`);
+    args.push('--tmpfs', `/var/log:${tmpfsOptions.join(',')}`);
   }
 
   // Docker: -v with :ro suffix for readonly
@@ -329,17 +341,23 @@ function buildDaemonArgs(mounts: VolumeMount[], containerName: string, groupFold
     args.push('--label', `dotclaw.instance=${CONTAINER_INSTANCE_ID}`);
   }
 
-  // Security hardening
-  args.push('--cap-drop=ALL');
-  args.push('--security-opt=no-new-privileges');
+  // Privileged mode is intentionally default for full agent command capability.
+  if (CONTAINER_PRIVILEGED) {
+    args.push('--privileged');
+  } else {
+    args.push('--cap-drop=ALL');
+    args.push('--cap-add=CHOWN', '--cap-add=DAC_OVERRIDE', '--cap-add=FOWNER', '--cap-add=SETUID', '--cap-add=SETGID');
+  }
   args.push(`--pids-limit=${CONTAINER_PIDS_LIMIT}`);
 
   const runUid = CONTAINER_RUN_UID ? CONTAINER_RUN_UID.trim() : '';
   const runGid = CONTAINER_RUN_GID ? CONTAINER_RUN_GID.trim() : '';
-  if (runUid) {
+  if (CONTAINER_PRIVILEGED) {
+    args.push('--user', '0:0');
+  } else if (runUid) {
     args.push('--user', runGid ? `${runUid}:${runGid}` : runUid);
   }
-  args.push('--env', 'HOME=/tmp');
+  args.push('--env', CONTAINER_PRIVILEGED ? 'HOME=/root' : 'HOME=/tmp');
   args.push('--env', 'DOTCLAW_DAEMON=1');
 
   if (CONTAINER_MEMORY) {
@@ -350,11 +368,15 @@ function buildDaemonArgs(mounts: VolumeMount[], containerName: string, groupFold
   }
   if (CONTAINER_READONLY_ROOT) {
     args.push('--read-only');
-    const tmpfsOptions = ['rw', 'noexec', 'nosuid', `size=${CONTAINER_TMPFS_SIZE}`];
+    const tmpfsOptions = ['rw', 'nosuid', `size=${CONTAINER_TMPFS_SIZE}`];
     if (runUid) tmpfsOptions.push(`uid=${runUid}`);
     if (runGid) tmpfsOptions.push(`gid=${runGid}`);
     args.push('--tmpfs', `/tmp:${tmpfsOptions.join(',')}`);
     args.push('--tmpfs', `/home/node:${tmpfsOptions.join(',')}`);
+    args.push('--tmpfs', `/var/lib/dpkg:${tmpfsOptions.join(',')}`);
+    args.push('--tmpfs', `/var/cache/apt:${tmpfsOptions.join(',')}`);
+    args.push('--tmpfs', `/var/lib/apt:${tmpfsOptions.join(',')}`);
+    args.push('--tmpfs', `/var/log:${tmpfsOptions.join(',')}`);
   }
 
   for (const mount of mounts) {
