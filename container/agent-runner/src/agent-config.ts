@@ -182,7 +182,7 @@ const DEFAULT_AGENT_CONFIG: AgentRuntimeConfig['agent'] = {
     minResponseTokens: 160
   },
   tools: {
-    maxToolSteps: 24,
+    maxToolSteps: 96,
     outputLimitBytes: 400_000,
     enableBash: true,
     enableWebSearch: true,
@@ -210,9 +210,9 @@ const DEFAULT_AGENT_CONFIG: AgentRuntimeConfig['agent'] = {
     progress: {
       enabled: true,
       minIntervalMs: 30_000,
-      notifyTools: ['WebSearch', 'WebFetch', 'Bash', 'GitClone', 'NpmInstall'],
-      notifyOnStart: true,
-      notifyOnError: true
+      notifyTools: [],
+      notifyOnStart: false,
+      notifyOnError: false
     },
     toolSummary: {
       enabled: true,

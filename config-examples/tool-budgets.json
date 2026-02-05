@@ -1,23 +1,25 @@
 {
   "default": {
     "per_day": {
-      "WebSearch": 50,
-      "WebFetch": 50,
-      "Bash": 20,
-      "Python": 15
+      "WebSearch": 1000,
+      "WebFetch": 1500,
+      "Bash": 2000,
+      "Python": 1500,
+      "GitClone": 400,
+      "NpmInstall": 300
     }
   },
   "groups": {
     "main": {
       "per_day": {
-        "Bash": 40
+        "Bash": 3000
       }
     }
   },
   "users": {
     "123456789": {
       "per_day": {
-        "WebFetch": 10
+        "WebFetch": 800
       }
     }
   }

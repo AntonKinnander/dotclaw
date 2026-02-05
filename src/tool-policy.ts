@@ -52,12 +52,12 @@ const DEFAULT_POLICY: ToolPolicy = {
   ],
   deny: [],
   max_per_run: {
-    Bash: 4,
-    Python: 4,
-    WebSearch: 5,
-    WebFetch: 6
+    Bash: 128,
+    Python: 64,
+    WebSearch: 40,
+    WebFetch: 60
   },
-  default_max_per_run: 32
+  default_max_per_run: 256
 };
 
 const POLICY_PATH = TOOL_POLICY_PATH;

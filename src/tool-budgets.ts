@@ -45,11 +45,12 @@ export function loadToolBudgetConfig(): ToolBudgetConfig {
   const fallback: ToolBudgetConfig = {
     default: {
       per_day: {
-        WebSearch: 30,
-        WebFetch: 30,
-        Bash: 15,
-        GitClone: 10,
-        NpmInstall: 5
+        WebSearch: 1000,
+        WebFetch: 1500,
+        Bash: 2000,
+        Python: 1500,
+        GitClone: 400,
+        NpmInstall: 300
       }
     }
   };
@@ -61,7 +62,7 @@ export function applyToolBudgets(params: {
   userId?: string | null;
   toolPolicy: ToolPolicy;
 }): ToolPolicy {
-    if (!runtime.host.toolBudgets.enabled) return params.toolPolicy;
+  if (!runtime.host.toolBudgets.enabled) return params.toolPolicy;
 
   const config = loadToolBudgetConfig();
   const base = mergeBudgets({ per_day: {} }, config.default);
