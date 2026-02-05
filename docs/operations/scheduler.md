@@ -18,6 +18,8 @@ Set `host.timezone` in `~/.dotclaw/config/runtime.json` to override the system t
 }
 ```
 
+This timezone is also passed to the agent so it can interpret and present timestamps consistently.
+
 ## Scheduling tasks
 
 Create tasks with natural language prompts in Telegram:

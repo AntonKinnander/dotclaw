@@ -45,6 +45,8 @@ After installation, use the `dotclaw` CLI:
 ```bash
 dotclaw setup        # Full setup (init + configure + build + install service)
 dotclaw configure    # Re-configure API keys and model
+dotclaw add-instance # Create and start an isolated instance
+dotclaw instances    # List discovered instances
 dotclaw build        # Build the Docker container image
 dotclaw start        # Start the service
 dotclaw stop         # Stop the service
@@ -53,6 +55,13 @@ dotclaw logs         # View logs (add --follow to tail)
 dotclaw status       # Show service status
 dotclaw doctor       # Run diagnostics
 dotclaw register     # Register a new Telegram chat
+```
+
+Instance flags:
+
+```bash
+dotclaw status --id dev   # Run against a specific instance (~/.dotclaw-dev)
+dotclaw restart --all     # Restart all instances
 ```
 
 ## Configuration

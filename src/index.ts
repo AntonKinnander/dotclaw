@@ -32,6 +32,8 @@ import {
   setGroupSession,
   deleteGroupSession,
   pauseTasksForGroup,
+  getBackgroundJobQueuePosition,
+  getBackgroundJobQueueDepth,
   linkMessageToTrace,
   getTraceIdForMessage,
   recordUserFeedback
@@ -63,10 +65,10 @@ import {
   MemoryItemInput
 } from './memory-store.js';
 import { startEmbeddingWorker } from './memory-embeddings.js';
-import { createProgressNotifier, DEFAULT_PROGRESS_MESSAGES } from './progress.js';
+import { createProgressManager, DEFAULT_PROGRESS_MESSAGES, DEFAULT_PROGRESS_STAGES, formatProgressWithPlan, formatPlanStepList } from './progress.js';
 import { parseAdminCommand } from './admin-commands.js';
 import { loadModelRegistry, saveModelRegistry } from './model-registry.js';
-import { startMetricsServer, recordMessage, recordError } from './metrics.js';
+import { startMetricsServer, recordMessage, recordError, recordRoutingDecision, recordStageLatency } from './metrics.js';
 import { startMaintenanceLoop } from './maintenance.js';
 import { warmGroupContainer, startDaemonHealthCheckLoop } from './container-runner.js';
 import { loadRuntimeConfig } from './runtime-config.js';
@@ -75,6 +77,8 @@ import { logger } from './logger.js';
 import { startDashboard, setTelegramConnected, setLastMessageTime, setMessageQueueDepth } from './dashboard.js';
 import { humanizeError } from './error-messages.js';
 import { classifyBackgroundJob } from './background-job-classifier.js';
+import { routeRequest, routePrompt } from './request-router.js';
+import { probePlanner } from './planner-probe.js';
 
 const runtime = loadRuntimeConfig();
 
@@ -215,13 +219,6 @@ const TELEGRAM_STREAM_MIN_CHARS = runtime.host.telegram.streamMinChars;
 const MEMORY_RECALL_MAX_RESULTS = runtime.host.memory.recall.maxResults;
 const MEMORY_RECALL_MAX_TOKENS = runtime.host.memory.recall.maxTokens;
 const INPUT_MESSAGE_MAX_CHARS = runtime.host.telegram.inputMessageMaxChars;
-const PROGRESS_ENABLED = runtime.host.progress.enabled;
-const PROGRESS_INITIAL_MS = runtime.host.progress.initialMs;
-const PROGRESS_INTERVAL_MS = runtime.host.progress.intervalMs;
-const PROGRESS_MAX_UPDATES = runtime.host.progress.maxUpdates;
-const PROGRESS_MESSAGES = runtime.host.progress.messages.length > 0
-  ? runtime.host.progress.messages
-  : DEFAULT_PROGRESS_MESSAGES;
 const HEARTBEAT_ENABLED = runtime.host.heartbeat.enabled;
 const HEARTBEAT_INTERVAL_MS = runtime.host.heartbeat.intervalMs;
 const HEARTBEAT_GROUP_FOLDER = (runtime.host.heartbeat.groupFolder || MAIN_GROUP_FOLDER).trim() || MAIN_GROUP_FOLDER;
@@ -254,6 +251,61 @@ type QueueState = {
 };
 
 const messageQueues = new Map<string, QueueState>();
+const activeRuns = new Map<string, AbortController>();
+
+function isCancelMessage(content: string): boolean {
+  if (!content) return false;
+  const normalized = content.trim().toLowerCase();
+  return normalized === 'cancel'
+    || normalized === 'stop'
+    || normalized === 'abort'
+    || normalized === 'cancel request'
+    || normalized === 'stop request';
+}
+
+function inferProgressStage(params: { content: string; plannerTools: string[]; plannerSteps: string[]; enablePlanner: boolean }): string {
+  const content = params.content.toLowerCase();
+  const tools = params.plannerTools.map(tool => tool.toLowerCase());
+  const hasWebTool = tools.some(tool => tool.includes('web') || tool.includes('search') || tool.includes('fetch'));
+  const hasCodeTool = tools.some(tool => tool.includes('bash') || tool.includes('edit') || tool.includes('write') || tool.includes('git'));
+  if (params.enablePlanner) return 'planning';
+  if (hasWebTool || /research|search|browse|web|site|docs/.test(content)) return 'searching';
+  if (hasCodeTool || /build|code|implement|refactor|fix|debug/.test(content)) return 'coding';
+  return 'drafting';
+}
+
+function estimateForegroundMs(params: { content: string; routing: { estimatedMinutes?: number; profile: string }; plannerSteps: string[]; plannerTools: string[] }): number | null {
+  if (typeof params.routing.estimatedMinutes === 'number' && Number.isFinite(params.routing.estimatedMinutes)) {
+    return Math.max(1000, params.routing.estimatedMinutes * 60_000);
+  }
+  const baseChars = params.content.length;
+  if (baseChars === 0) return null;
+  const stepFactor = params.plannerSteps.length > 0 ? params.plannerSteps.length * 6000 : 0;
+  const toolFactor = params.plannerTools.length > 0 ? params.plannerTools.length * 8000 : 0;
+  const lengthFactor = Math.min(60_000, Math.max(3000, Math.round(baseChars / 3)));
+  const profileFactor = params.routing.profile === 'deep' ? 1.4 : 1;
+  return Math.round((lengthFactor + stepFactor + toolFactor) * profileFactor);
+}
+
+function inferPlanStepIndex(stage: string, totalSteps: number): number | null {
+  if (!Number.isFinite(totalSteps) || totalSteps <= 0) return null;
+  const normalized = stage.trim().toLowerCase();
+  if (!normalized) return 1;
+  switch (normalized) {
+    case 'planning':
+      return 1;
+    case 'searching':
+      return Math.min(2, totalSteps);
+    case 'coding':
+      return Math.min(Math.max(2, Math.ceil(totalSteps * 0.6)), totalSteps);
+    case 'drafting':
+      return Math.min(Math.max(2, Math.ceil(totalSteps * 0.8)), totalSteps);
+    case 'finalizing':
+      return totalSteps;
+    default:
+      return 1;
+  }
+}
 
 type TelegramStreamMode = 'off' | 'draft' | 'edit' | 'auto';
 
@@ -689,6 +741,17 @@ interface TelegramMessage {
 }
 
 function enqueueMessage(msg: TelegramMessage): void {
+  if (isCancelMessage(msg.content)) {
+    const controller = activeRuns.get(msg.chatId);
+    if (controller) {
+      controller.abort();
+      activeRuns.delete(msg.chatId);
+      void sendMessage(msg.chatId, 'Canceled the current request.', { messageThreadId: msg.messageThreadId });
+      return;
+    }
+    void sendMessage(msg.chatId, 'There is no active request to cancel.', { messageThreadId: msg.messageThreadId });
+    return;
+  }
   const existing = messageQueues.get(msg.chatId);
   if (existing) {
     existing.pendingMessage = msg;
@@ -770,6 +833,21 @@ ${lines.join('\n')}
 </messages>`;
   const lastMessage = missedMessages[missedMessages.length - 1];
 
+  const routingStartedAt = Date.now();
+  const routingDecision = routeRequest({
+    prompt,
+    lastMessage
+  });
+  recordRoutingDecision(routingDecision.profile);
+  const routerMs = Date.now() - routingStartedAt;
+  recordStageLatency('router', routerMs, 'telegram');
+  logger.info({
+    chatId: msg.chatId,
+    profile: routingDecision.profile,
+    reason: routingDecision.reason,
+    shouldBackground: routingDecision.shouldBackground
+  }, 'Routing decision');
+
   const traceBase = createTraceBase({
     chatId: msg.chatId,
     groupFolder: group.folder,
@@ -796,29 +874,73 @@ ${lines.join('\n')}
     return /timed out|timeout/i.test(value);
   };
 
-  const maybeAutoSpawn = async (reason: 'timeout' | 'tool_limit' | 'classifier', detail?: string | null): Promise<boolean> => {
-    if (!AUTO_SPAWN_ENABLED) return false;
+  const shouldPlannerProbe = () => {
+    const config = runtime.host.routing.plannerProbe;
+    if (!config.enabled) return false;
+    if (routingDecision.profile === 'fast' || routingDecision.shouldBackground) return false;
+    const contentLength = lastMessage?.content?.length || 0;
+    return contentLength >= config.minChars;
+  };
+
+  const maybeAutoSpawn = async (
+    reason: 'timeout' | 'tool_limit' | 'classifier' | 'router' | 'planner',
+    detail?: string | null,
+    overrides?: {
+      modelOverride?: string;
+      maxToolSteps?: number;
+      timeoutMs?: number;
+      tags?: string[];
+    }
+  ): Promise<boolean> => {
+    if (!BACKGROUND_JOBS_ENABLED) return false;
+    if (reason !== 'router' && !AUTO_SPAWN_ENABLED) return false;
     if (reason === 'timeout' && !AUTO_SPAWN_ON_TIMEOUT) return false;
     if (reason === 'tool_limit' && !AUTO_SPAWN_ON_TOOL_LIMIT) return false;
 
+    const tags = ['auto-spawn', reason, `profile:${routingDecision.profile}`];
+    if (overrides?.tags && overrides.tags.length > 0) {
+      tags.push(...overrides.tags);
+    }
+    if (routingDecision.estimatedMinutes) {
+      tags.push(`eta:${routingDecision.estimatedMinutes}`);
+    }
+    const estimatedMs = typeof routingDecision.estimatedMinutes === 'number'
+      ? routingDecision.estimatedMinutes * 60_000
+      : null;
+    const computedTimeoutMs = estimatedMs
+      ? Math.min(runtime.host.backgroundJobs.maxRuntimeMs, Math.max(5 * 60_000, Math.round(estimatedMs * 2)))
+      : undefined;
     const result = spawnBackgroundJob({
       prompt,
       groupFolder: group.folder,
       chatJid: msg.chatId,
       contextMode: 'group',
-      tags: ['auto-spawn', reason],
+      tags,
       parentTraceId: traceBase.trace_id,
-      parentMessageId: msg.messageId
+      parentMessageId: msg.messageId,
+      modelOverride: overrides?.modelOverride ?? routingDecision.modelOverride,
+      maxToolSteps: overrides?.maxToolSteps ?? routingDecision.maxToolSteps,
+      toolAllow: routingDecision.toolAllow,
+      toolDeny: routingDecision.toolDeny,
+      timeoutMs: overrides?.timeoutMs ?? computedTimeoutMs
     });
     if (!result.ok || !result.jobId) {
       logger.warn({ chatId: msg.chatId, reason, error: result.error }, 'Auto-spawn background job failed');
       return false;
     }
 
+    const queuePosition = getBackgroundJobQueuePosition({ jobId: result.jobId, groupFolder: group.folder });
+    const eta = routingDecision.estimatedMinutes ? `${routingDecision.estimatedMinutes} min` : null;
     const detailLine = detail ? `\n\nReason: ${detail}` : '';
+    const queueLine = queuePosition ? `\n\nQueue position: ${queuePosition.position} of ${queuePosition.total}` : '';
+    const etaLine = eta ? `\n\nEstimated time: ${eta}` : '';
+    const planPreview = plannerProbeSteps.length > 0
+      ? formatPlanStepList({ steps: plannerProbeSteps, currentStep: 1, maxSteps: 4 })
+      : '';
+    const planLine = planPreview ? `\n\nPlanned steps:\n${planPreview}` : '';
     await sendMessage(
       msg.chatId,
-      `Queued this as background job ${result.jobId}. I'll report back when it's done. You can keep chatting while it runs.${detailLine}`,
+      `Queued this as background job ${result.jobId}. I'll report back when it's done. You can keep chatting while it runs.${queueLine}${etaLine}${detailLine}${planLine}`,
       { messageThreadId: msg.messageThreadId }
     );
 
@@ -831,14 +953,57 @@ ${lines.join('\n')}
     return true;
   };
 
-  if (AUTO_SPAWN_ENABLED && AUTO_SPAWN_CLASSIFIER_ENABLED && lastMessage) {
+  let plannerProbeTools: string[] = [];
+  let plannerProbeSteps: string[] = [];
+  let plannerProbeMs: number | null = null;
+  if (shouldPlannerProbe() && lastMessage) {
+    const probeStarted = Date.now();
+    const probeResult = await probePlanner({
+      lastMessage,
+      recentMessages: missedMessages
+    });
+    plannerProbeMs = Date.now() - probeStarted;
+    recordStageLatency('planner_probe', plannerProbeMs, 'telegram');
+    if (probeResult.steps.length > 0) plannerProbeSteps = probeResult.steps;
+    if (probeResult.tools.length > 0) plannerProbeTools = probeResult.tools;
+    logger.info({
+      chatId: msg.chatId,
+      shouldBackground: probeResult.shouldBackground,
+      steps: probeResult.steps.length,
+      tools: probeResult.tools.length,
+      latencyMs: probeResult.latencyMs,
+      model: probeResult.model,
+      error: probeResult.error
+    }, 'Planner probe decision');
+    if (probeResult.shouldBackground) {
+      const autoSpawned = await maybeAutoSpawn('planner', 'planner probe predicted multi-step work');
+      if (autoSpawned) return true;
+    }
+  }
+
+  if (routingDecision.shouldBackground) {
+    const autoSpawned = await maybeAutoSpawn('router', routingDecision.reason);
+    if (autoSpawned) {
+      return true;
+    }
+  }
+
+  let classifierMs: number | null = null;
+  if (AUTO_SPAWN_ENABLED && AUTO_SPAWN_CLASSIFIER_ENABLED && lastMessage && routingDecision.shouldRunClassifier) {
     try {
+      const queueDepth = getBackgroundJobQueueDepth({ groupFolder: group.folder });
       const classifierResult = await classifyBackgroundJob({
         lastMessage,
         recentMessages: missedMessages,
         isGroup: msg.isGroup,
-        chatType: msg.chatType
+        chatType: msg.chatType,
+        queueDepth,
+        metricsSource: 'telegram'
       });
+      if (classifierResult.latencyMs) {
+        classifierMs = classifierResult.latencyMs;
+        recordStageLatency('classifier', classifierResult.latencyMs, 'telegram');
+      }
       logger.info({
         chatId: msg.chatId,
         decision: classifierResult.shouldBackground,
@@ -849,7 +1014,11 @@ ${lines.join('\n')}
         error: classifierResult.error
       }, 'Background job classifier decision');
       if (classifierResult.shouldBackground) {
-        const autoSpawned = await maybeAutoSpawn('classifier');
+        const estimated = classifierResult.estimatedMinutes;
+        if (typeof estimated === 'number' && Number.isFinite(estimated) && estimated > 0) {
+          routingDecision.estimatedMinutes = Math.round(estimated);
+        }
+        const autoSpawned = await maybeAutoSpawn('classifier', classifierResult.reason);
         if (autoSpawned) {
           return true;
         }
@@ -859,17 +1028,76 @@ ${lines.join('\n')}
     }
   }
 
-  const progressNotifier = createProgressNotifier({
-    enabled: PROGRESS_ENABLED && !streamingEnabled,
-    initialDelayMs: PROGRESS_INITIAL_MS,
-    intervalMs: PROGRESS_INTERVAL_MS,
-    maxUpdates: PROGRESS_MAX_UPDATES,
-    messages: PROGRESS_MESSAGES,
+  const predictedStage = inferProgressStage({
+    content: lastMessage?.content || prompt,
+    plannerTools: plannerProbeTools,
+    plannerSteps: plannerProbeSteps,
+    enablePlanner: routingDecision.enablePlanner
+  });
+  const predictedMs = estimateForegroundMs({
+    content: lastMessage?.content || prompt,
+    routing: routingDecision,
+    plannerSteps: plannerProbeSteps,
+    plannerTools: plannerProbeTools
+  });
+  const planStepIndex = inferPlanStepIndex(predictedStage, plannerProbeSteps.length);
+
+  const progressManager = createProgressManager({
+    enabled: routingDecision.progress.enabled && !streamingEnabled,
+    initialDelayMs: routingDecision.progress.initialMs,
+    intervalMs: routingDecision.progress.intervalMs,
+    maxUpdates: routingDecision.progress.maxUpdates,
+    messages: routingDecision.progress.messages.length > 0
+      ? routingDecision.progress.messages
+      : DEFAULT_PROGRESS_MESSAGES,
+    stageMessages: DEFAULT_PROGRESS_STAGES,
+    stageThrottleMs: 20_000,
     send: async (text) => { await sendMessage(msg.chatId, text, { messageThreadId: msg.messageThreadId }); },
     onError: (err) => logger.debug({ chatId: msg.chatId, err }, 'Failed to send progress update')
   });
-  progressNotifier.start();
+  progressManager.start();
+  let sentPlan = false;
+  if (predictedMs && predictedMs >= 10_000 && routingDecision.progress.enabled && !streamingEnabled) {
+    if (plannerProbeSteps.length > 0) {
+      const planMessage = formatProgressWithPlan({
+        steps: plannerProbeSteps,
+        currentStep: planStepIndex ?? 1,
+        stage: predictedStage
+      });
+      progressManager.notify(planMessage);
+      sentPlan = true;
+    } else {
+      progressManager.notify(DEFAULT_PROGRESS_STAGES.ack);
+    }
+  }
+  if (!(sentPlan && predictedStage === 'planning')) {
+    progressManager.setStage(predictedStage);
+  }
+  if (predictedStage === 'planning') {
+    const followUpStage = inferProgressStage({
+      content: lastMessage?.content || prompt,
+      plannerTools: plannerProbeTools,
+      plannerSteps: plannerProbeSteps,
+      enablePlanner: false
+    });
+    if (followUpStage !== 'planning') {
+      const delay = Math.min(15_000, Math.max(5_000, Math.floor(routingDecision.progress.initialMs / 2)));
+      setTimeout(() => progressManager.setStage(followUpStage), delay);
+    }
+  }
+  const abortController = new AbortController();
+  activeRuns.set(msg.chatId, abortController);
   try {
+    const recallMaxResults = routingDecision.enableMemoryRecall
+      ? (Number.isFinite(routingDecision.recallMaxResults)
+        ? Math.max(0, Math.floor(routingDecision.recallMaxResults as number))
+        : MEMORY_RECALL_MAX_RESULTS)
+      : 0;
+    const recallMaxTokens = routingDecision.enableMemoryRecall
+      ? (Number.isFinite(routingDecision.recallMaxTokens)
+        ? Math.max(0, Math.floor(routingDecision.recallMaxTokens as number))
+        : MEMORY_RECALL_MAX_TOKENS)
+      : 0;
     const execution = await executeAgentRun({
       group,
       prompt,
@@ -877,8 +1105,10 @@ ${lines.join('\n')}
       userId: msg.senderId,
       userName: msg.senderName,
       recallQuery: recallQuery || msg.content,
-      recallMaxResults: MEMORY_RECALL_MAX_RESULTS,
-      recallMaxTokens: MEMORY_RECALL_MAX_TOKENS,
+      recallMaxResults,
+      recallMaxTokens,
+      toolAllow: routingDecision.toolAllow,
+      toolDeny: routingDecision.toolDeny,
       sessionId: sessions[group.folder],
       onSessionUpdate: (sessionId) => { sessions[group.folder] = sessionId; },
       streaming: streamingEnabled && draftId
@@ -890,12 +1120,21 @@ ${lines.join('\n')}
         }
         : undefined,
       availableGroups: buildAvailableGroupsSnapshot(),
+      modelOverride: routingDecision.modelOverride,
+      modelMaxOutputTokens: routingDecision.maxOutputTokens,
+      maxToolSteps: routingDecision.maxToolSteps,
+      disablePlanner: !routingDecision.enablePlanner,
+      disableResponseValidation: !routingDecision.enableResponseValidation,
+      responseValidationMaxRetries: routingDecision.responseValidationMaxRetries,
+      disableMemoryExtraction: !routingDecision.enableMemoryExtraction,
+      abortSignal: abortController.signal,
       timeoutMs: AUTO_SPAWN_ENABLED && AUTO_SPAWN_FOREGROUND_TIMEOUT_MS > 0
         ? AUTO_SPAWN_FOREGROUND_TIMEOUT_MS
         : undefined
     });
     output = execution.output;
     context = execution.context;
+    progressManager.setStage('finalizing');
 
     if (output.status === 'error') {
       errorMessage = output.error || 'Unknown error';
@@ -909,8 +1148,14 @@ ${lines.join('\n')}
     }
     logger.error({ group: group.name, err }, 'Agent error');
   } finally {
-    progressNotifier.stop();
+    progressManager.stop();
+    activeRuns.delete(msg.chatId);
   }
+
+  const extraTimings: Record<string, number> = {};
+  extraTimings.router_ms = routerMs;
+  if (classifierMs !== null) extraTimings.classifier_ms = classifierMs;
+  if (plannerProbeMs !== null) extraTimings.planner_probe_ms = plannerProbeMs;
 
   if (!output) {
     const message = errorMessage || 'No output from agent';
@@ -922,7 +1167,8 @@ ${lines.join('\n')}
         metricsSource: 'telegram',
         toolAuditSource: 'message',
         errorMessage: message,
-        errorType: 'agent'
+        errorType: 'agent',
+        extraTimings
       });
     } else {
       recordError('agent');
@@ -964,7 +1210,8 @@ ${lines.join('\n')}
         metricsSource: 'telegram',
         toolAuditSource: 'message',
         errorMessage: errorMessage || output.error || 'Unknown error',
-        errorType: 'agent'
+        errorType: 'agent',
+        extraTimings
       });
     }
     logger.error({ group: group.name, error: output.error }, 'Container agent error');
@@ -1015,7 +1262,8 @@ ${lines.join('\n')}
             output,
             context,
             metricsSource: 'telegram',
-            toolAuditSource: 'message'
+            toolAuditSource: 'message',
+            extraTimings
           });
         }
         return true;
@@ -1042,7 +1290,8 @@ ${lines.join('\n')}
       output,
       context,
       metricsSource: 'telegram',
-      toolAuditSource: 'message'
+      toolAuditSource: 'message',
+      extraTimings
     });
   }
 
@@ -1243,13 +1492,24 @@ async function runHeartbeatOnce(): Promise<void> {
     inputText: prompt,
     source: 'dotclaw-heartbeat'
   });
+  const routingStartedAt = Date.now();
+  const routingDecision = routePrompt(prompt);
+  recordRoutingDecision(routingDecision.profile);
+  const routerMs = Date.now() - routingStartedAt;
+  recordStageLatency('router', routerMs, 'scheduler');
 
   let output: ContainerOutput | null = null;
   let context: AgentContext | null = null;
   let errorMessage: string | null = null;
 
-  const recallMaxResults = Math.max(4, MEMORY_RECALL_MAX_RESULTS - 2);
-  const recallMaxTokens = Math.max(600, MEMORY_RECALL_MAX_TOKENS - 200);
+  const baseRecallResults = Number.isFinite(routingDecision.recallMaxResults)
+    ? Math.max(0, Math.floor(routingDecision.recallMaxResults as number))
+    : MEMORY_RECALL_MAX_RESULTS;
+  const baseRecallTokens = Number.isFinite(routingDecision.recallMaxTokens)
+    ? Math.max(0, Math.floor(routingDecision.recallMaxTokens as number))
+    : MEMORY_RECALL_MAX_TOKENS;
+  const recallMaxResults = routingDecision.enableMemoryRecall ? Math.max(4, baseRecallResults - 2) : 0;
+  const recallMaxTokens = routingDecision.enableMemoryRecall ? Math.max(600, baseRecallTokens - 200) : 0;
 
   try {
     const execution = await executeAgentRun({
@@ -1263,7 +1523,14 @@ async function runHeartbeatOnce(): Promise<void> {
       sessionId: sessions[group.folder],
       onSessionUpdate: (sessionId) => { sessions[group.folder] = sessionId; },
       isScheduledTask: true,
-      availableGroups: buildAvailableGroupsSnapshot()
+      availableGroups: buildAvailableGroupsSnapshot(),
+      modelOverride: routingDecision.modelOverride,
+      modelMaxOutputTokens: routingDecision.maxOutputTokens,
+      maxToolSteps: routingDecision.maxToolSteps,
+      disablePlanner: !routingDecision.enablePlanner,
+      disableResponseValidation: !routingDecision.enableResponseValidation,
+      responseValidationMaxRetries: routingDecision.responseValidationMaxRetries,
+      disableMemoryExtraction: !routingDecision.enableMemoryExtraction
     });
     output = execution.output;
     context = execution.context;
@@ -1286,7 +1553,8 @@ async function runHeartbeatOnce(): Promise<void> {
       output,
       context,
       toolAuditSource: 'heartbeat',
-      errorMessage: errorMessage ?? undefined
+      errorMessage: errorMessage ?? undefined,
+      extraTimings: { router_ms: routerMs }
     });
   } else if (errorMessage) {
     writeTrace({

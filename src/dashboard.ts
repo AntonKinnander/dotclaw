@@ -34,6 +34,11 @@ interface HealthStatus {
     memoryItemCount?: number;
     error?: string;
   };
+  backgroundJobs?: {
+    queued: number;
+    running: number;
+    avgDurationMs?: number;
+  };
   container: {
     status: 'ok' | 'error' | 'unknown';
     mode: string;
@@ -95,7 +100,7 @@ function formatUptime(seconds: number): string {
   return parts.join(' ');
 }
 
-function checkDatabaseHealth(): HealthStatus['database'] {
+function checkDatabaseHealth(): { database: HealthStatus['database']; backgroundJobs: HealthStatus['backgroundJobs'] } {
   try {
     const messagesDbPath = path.join(STORE_DIR, 'messages.db');
     const memoryDbPath = path.join(STORE_DIR, 'memory.db');
@@ -104,6 +109,9 @@ function checkDatabaseHealth(): HealthStatus['database'] {
     let taskCount = 0;
     let jobCount = 0;
     let memoryItemCount = 0;
+    let queuedJobs = 0;
+    let runningJobs = 0;
+    let avgJobDurationMs: number | undefined;
 
     if (fs.existsSync(messagesDbPath)) {
       const db = new Database(messagesDbPath, { readonly: true });
@@ -116,6 +124,17 @@ function checkDatabaseHealth(): HealthStatus['database'] {
 
         const jobRow = db.prepare('SELECT COUNT(*) as count FROM background_jobs').get() as { count: number };
         jobCount = jobRow?.count || 0;
+
+        const queuedRow = db.prepare(`SELECT COUNT(*) as count FROM background_jobs WHERE status = 'queued'`).get() as { count: number };
+        queuedJobs = queuedRow?.count || 0;
+
+        const runningRow = db.prepare(`SELECT COUNT(*) as count FROM background_jobs WHERE status = 'running'`).get() as { count: number };
+        runningJobs = runningRow?.count || 0;
+
+        const avgRow = db.prepare(`SELECT AVG(duration_ms) as avg FROM background_job_runs WHERE status = 'success'`).get() as { avg: number };
+        if (avgRow && Number.isFinite(avgRow.avg)) {
+          avgJobDurationMs = Number(avgRow.avg);
+        }
       } finally {
         db.close();
       }
@@ -132,16 +151,29 @@ function checkDatabaseHealth(): HealthStatus['database'] {
     }
 
     return {
-      status: 'ok',
-      messageCount,
-      taskCount,
-      jobCount,
-      memoryItemCount
+      database: {
+        status: 'ok',
+        messageCount,
+        taskCount,
+        jobCount,
+        memoryItemCount
+      },
+      backgroundJobs: {
+        queued: queuedJobs,
+        running: runningJobs,
+        avgDurationMs: avgJobDurationMs
+      }
     };
   } catch (err) {
     return {
-      status: 'error',
-      error: err instanceof Error ? err.message : String(err)
+      database: {
+        status: 'error',
+        error: err instanceof Error ? err.message : String(err)
+      },
+      backgroundJobs: {
+        queued: 0,
+        running: 0
+      }
     };
   }
 }
@@ -225,7 +257,7 @@ export async function getHealthStatus(): Promise<HealthStatus> {
   const uptime = process.uptime();
   const memUsage = process.memoryUsage();
 
-  const database = checkDatabaseHealth();
+  const { database, backgroundJobs } = checkDatabaseHealth();
   const container = checkContainerHealth();
   const telegram = checkTelegramHealth();
   const openrouter = await checkOpenRouterHealth();
@@ -253,6 +285,7 @@ export async function getHealthStatus(): Promise<HealthStatus> {
     container,
     telegram,
     openrouter,
+    backgroundJobs,
     lastMessage: lastMessageTime || undefined,
     queueDepth: messageQueueDepth,
     version: getVersion()
@@ -316,6 +349,17 @@ function formatBytes(bytes: number): string {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+function formatDurationMs(value?: number): string {
+  if (!Number.isFinite(value)) return '-';
+  const ms = Number(value);
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  const seconds = ms / 1000;
+  if (seconds < 60) return `${seconds.toFixed(1)}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainder = Math.round(seconds % 60);
+  return `${minutes}m ${remainder}s`;
 }
 
 function getStatusEmoji(status: string): string {
@@ -472,6 +516,18 @@ function renderHtmlDashboard(health: HealthStatus): string {
         <div class="metric">
           <span class="metric-label">Background Jobs</span>
           <span class="metric-value">${health.database.jobCount?.toLocaleString() ?? '-'}</span>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Jobs Queued</span>
+          <span class="metric-value">${health.backgroundJobs?.queued?.toLocaleString() ?? '-'}</span>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Jobs Running</span>
+          <span class="metric-value">${health.backgroundJobs?.running?.toLocaleString() ?? '-'}</span>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Avg Job Duration</span>
+          <span class="metric-value">${formatDurationMs(health.backgroundJobs?.avgDurationMs)}</span>
         </div>
         <div class="metric">
           <span class="metric-label">Queue Depth</span>

@@ -13,7 +13,8 @@ title: Runtime Config
   "host": {
     "logLevel": "info",
     "container": {
-      "mode": "daemon"
+      "mode": "daemon",
+      "instanceId": ""
     },
     "metrics": {
       "port": 3001,
@@ -31,11 +32,17 @@ title: Runtime Config
       "enabled": true,
       "maxConcurrent": 2,
       "maxRuntimeMs": 2400000,
+      "progress": {
+        "enabled": true,
+        "startDelayMs": 30000,
+        "intervalMs": 120000,
+        "maxUpdates": 3
+      },
       "inlineMaxChars": 8000,
       "contextModeDefault": "group",
       "autoSpawn": {
         "enabled": true,
-        "foregroundTimeoutMs": 180000,
+        "foregroundTimeoutMs": 90000,
         "onTimeout": true,
         "onToolLimit": true,
         "classifier": {
@@ -47,6 +54,29 @@ title: Runtime Config
           "confidenceThreshold": 0.6
         }
       }
+    },
+    "routing": {
+      "enabled": true,
+      "maxFastChars": 200,
+      "maxStandardChars": 1200,
+      "backgroundMinChars": 2000,
+      "classifierFallback": { "enabled": true, "minChars": 600 },
+      "plannerProbe": {
+        "enabled": true,
+        "model": "openai/gpt-5-nano",
+        "timeoutMs": 3000,
+        "maxOutputTokens": 120,
+        "temperature": 0,
+        "minChars": 700,
+        "minSteps": 5,
+        "minTools": 3
+      },
+      "profiles": {
+        "fast": { "model": "openai/gpt-5-nano", "maxOutputTokens": 256, "maxToolSteps": 6, "enablePlanner": false },
+        "standard": { "model": "openai/gpt-5-mini", "maxOutputTokens": 768, "maxToolSteps": 16 },
+        "deep": { "model": "moonshotai/kimi-k2.5", "maxOutputTokens": 1536, "maxToolSteps": 32 },
+        "background": { "model": "moonshotai/kimi-k2.5", "maxOutputTokens": 2048, "maxToolSteps": 64 }
+      }
     }
   },
   "agent": {
@@ -57,6 +87,20 @@ title: Runtime Config
     "planner": {
       "enabled": true,
       "mode": "auto"
+    },
+    "responseValidation": {
+      "enabled": true,
+      "minPromptTokens": 400,
+      "minResponseTokens": 160
+    },
+    "tools": {
+      "progress": {
+        "enabled": true,
+        "minIntervalMs": 30000,
+        "notifyTools": ["WebSearch", "WebFetch", "Bash", "GitClone", "NpmInstall"],
+        "notifyOnStart": true,
+        "notifyOnError": true
+      }
     }
   }
 }
@@ -65,16 +109,21 @@ title: Runtime Config
 ## Key sections
 
 - `host.container` controls Docker image, timeouts, resource limits, and mode.
+- `host.container.instanceId` lets you run multiple DotClaw instances on the same machine by
+  namespacing daemon container names.
 - `host.metrics.enabled` and `host.metrics.port` expose Prometheus metrics on `http://localhost:<port>/metrics`.
 - `host.dashboard.enabled` serves a basic status page on `http://localhost:<port+1>/`.
-- `host.timezone` overrides the scheduler timezone.
+- `host.timezone` overrides the scheduler timezone and is passed to the agent so timestamps are interpreted in the correct local time.
 - `host.heartbeat` controls automated heartbeat runs (disable if you don't want background activity).
 - `host.backgroundJobs` controls the background job queue (long-running async work).
+- `host.routing` controls request classification, per-profile model selection, and per-profile limits.
 - `host.trace.dir` and `host.promptPacksDir` control Autotune outputs.
 - `host.memory.embeddings` configures optional embeddings for recall.
 - `agent.assistantName` sets the assistant display name.
 - `agent.promptPacks` enables prompt pack loading and canary rate.
 - `agent.tools` controls access to built-in tools (bash, web search, web fetch).
+- `agent.responseValidation` gates the response quality validator with minimum prompt/response sizes.
+- `agent.tools.progress` controls tool-driven job progress notifications for background jobs.
 
 ## Tips
 
@@ -102,18 +151,60 @@ Example:
       "maxToolSteps": 64,
       "inlineMaxChars": 8000,
       "contextModeDefault": "group",
+      "progress": {
+        "enabled": true,
+        "startDelayMs": 30000,
+        "intervalMs": 120000,
+        "maxUpdates": 3
+      },
       "toolAllow": [],
       "toolDeny": ["mcp__dotclaw__schedule_task"],
       "autoSpawn": {
         "enabled": true,
-        "foregroundTimeoutMs": 180000,
+        "foregroundTimeoutMs": 90000,
         "onTimeout": true,
-        "onToolLimit": true
+        "onToolLimit": true,
+        "classifier": {
+          "enabled": true,
+          "confidenceThreshold": 0.6,
+          "adaptive": {
+            "enabled": true,
+            "minThreshold": 0.55,
+            "maxThreshold": 0.65,
+            "queueDepthLow": 0,
+            "queueDepthHigh": 4
+          }
+        }
       }
     }
   }
 }
 ```
+
+## Routing
+
+`host.routing` controls per-request routing profiles. Each profile can set the model, output limits, tool steps,
+feature toggles (planner, validation, memory recall/extraction), and profile-specific budgets like recall limits
+and response-validation retries. Use this to optimize latency and costs for simple requests while still enabling
+deep work for complex prompts.
+
+Planner probe (`host.routing.plannerProbe`) runs a lightweight planning call for borderline requests and can
+promote them to background jobs if the predicted plan includes many steps or tools.
+
+Profile fields (common):
+
+- `model`: per-profile model override
+- `maxOutputTokens`: response cap
+- `maxToolSteps`: tool-call step limit
+- `enablePlanner`: toggle planner
+- `enableValidation`: toggle response validation
+- `responseValidationMaxRetries`: per-request validation retries
+- `enableMemoryRecall`: toggle recall
+- `recallMaxResults`: recall item cap
+- `recallMaxTokens`: recall token cap
+- `enableMemoryExtraction`: toggle memory extraction
+- `toolAllow` / `toolDeny`: per-profile tool policy overrides
+- `progress`: optional per-profile progress settings
 
 ## Heartbeat
 

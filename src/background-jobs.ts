@@ -32,6 +32,8 @@ const JOBS_INLINE_MAX_CHARS = runtime.host.backgroundJobs.inlineMaxChars;
 const JOBS_CONTEXT_DEFAULT = runtime.host.backgroundJobs.contextModeDefault;
 const JOBS_TOOL_ALLOW = runtime.host.backgroundJobs.toolAllow;
 const JOBS_TOOL_DENY = runtime.host.backgroundJobs.toolDeny;
+const JOBS_PROGRESS = runtime.host.backgroundJobs.progress;
+const BACKGROUND_PROFILE = runtime.host.routing?.profiles?.background;
 
 type JobPolicy = {
   tool_allow?: string[];
@@ -73,6 +75,25 @@ function coerceJobPolicy(raw?: string | null): JobPolicy {
   } catch {
     return {};
   }
+}
+
+function extractEstimatedMinutes(tags?: string | null): number | null {
+  if (!tags) return null;
+  try {
+    const parsed = JSON.parse(tags) as string[];
+    if (!Array.isArray(parsed)) return null;
+    for (const tag of parsed) {
+      if (typeof tag !== 'string') continue;
+      const match = tag.match(/^eta:(\\d+(?:\\.\\d+)?)$/i);
+      if (match) {
+        const value = Number(match[1]);
+        if (Number.isFinite(value) && value > 0) return value;
+      }
+    }
+  } catch {
+    // ignore parse errors
+  }
+  return null;
 }
 
 function effectiveToolAllow(job: BackgroundJob): string[] | undefined {
@@ -139,6 +160,28 @@ async function runBackgroundJob(job: BackgroundJob, deps: BackgroundJobDependenc
   let context: AgentContext | null = null;
   let error: string | null = null;
   let resultText: string | null = null;
+  const recallEnabled = BACKGROUND_PROFILE?.enableMemoryRecall ?? true;
+  const recallMaxResults = recallEnabled
+    ? (Number.isFinite(BACKGROUND_PROFILE?.recallMaxResults)
+      ? Math.max(0, Math.floor(BACKGROUND_PROFILE?.recallMaxResults as number))
+      : runtime.host.memory.recall.maxResults)
+    : 0;
+  const recallMaxTokens = recallEnabled
+    ? (Number.isFinite(BACKGROUND_PROFILE?.recallMaxTokens)
+      ? Math.max(0, Math.floor(BACKGROUND_PROFILE?.recallMaxTokens as number))
+      : runtime.host.memory.recall.maxTokens)
+    : 0;
+  const maxToolSteps = job.max_tool_steps ?? BACKGROUND_PROFILE?.maxToolSteps ?? JOBS_MAX_TOOL_STEPS;
+  const modelOverride = job.model_override ?? BACKGROUND_PROFILE?.model;
+  const modelMaxOutputTokens = BACKGROUND_PROFILE?.maxOutputTokens;
+  const disablePlanner = BACKGROUND_PROFILE ? !BACKGROUND_PROFILE.enablePlanner : undefined;
+  const disableResponseValidation = BACKGROUND_PROFILE ? !BACKGROUND_PROFILE.enableValidation : undefined;
+  const responseValidationMaxRetries = Number.isFinite(BACKGROUND_PROFILE?.responseValidationMaxRetries)
+    ? Math.max(0, Math.floor(BACKGROUND_PROFILE?.responseValidationMaxRetries as number))
+    : undefined;
+  const disableMemoryExtraction = BACKGROUND_PROFILE ? !BACKGROUND_PROFILE.enableMemoryExtraction : undefined;
+  let progressTimer: NodeJS.Timeout | null = null;
+  let progressCount = 0;
 
   logBackgroundJobEvent({
     job_id: job.id,
@@ -164,6 +207,29 @@ async function runBackgroundJob(job: BackgroundJob, deps: BackgroundJobDependenc
 
   try {
     if (!error && group) {
+      if (JOBS_PROGRESS.enabled && job.chat_jid) {
+        const eta = extractEstimatedMinutes(job.tags);
+        const startedAt = Date.now();
+        const scheduleProgress = () => {
+          if (progressCount >= JOBS_PROGRESS.maxUpdates) return;
+          progressCount += 1;
+          const elapsedMinutes = Math.max(0, Math.floor((Date.now() - startedAt) / 60_000));
+          const remaining = eta ? Math.max(1, Math.ceil(eta - elapsedMinutes)) : null;
+          const etaLine = remaining ? ` ~${remaining} min remaining.` : '';
+          void deps.sendMessage(job.chat_jid, `Background job ${job.id} is still running.${etaLine}`);
+        };
+        const startDelay = Math.max(0, JOBS_PROGRESS.startDelayMs);
+        if (startDelay === 0) {
+          scheduleProgress();
+        }
+        progressTimer = setTimeout(function tick() {
+          scheduleProgress();
+          if (progressCount < JOBS_PROGRESS.maxUpdates) {
+            progressTimer = setTimeout(tick, Math.max(5_000, JOBS_PROGRESS.intervalMs));
+          }
+        }, startDelay);
+      }
+
       const sessions = deps.getSessions();
       const sessionId = job.context_mode === 'group'
         ? createSessionSnapshot(job.group_folder, sessions[job.group_folder])
@@ -175,8 +241,8 @@ async function runBackgroundJob(job: BackgroundJob, deps: BackgroundJobDependenc
         chatJid: job.chat_jid,
         userId: null,
         recallQuery: job.prompt,
-        recallMaxResults: runtime.host.memory.recall.maxResults,
-        recallMaxTokens: runtime.host.memory.recall.maxTokens,
+        recallMaxResults,
+        recallMaxTokens,
         sessionId,
         persistSession: false,
         isBackgroundJob: true,
@@ -186,8 +252,13 @@ async function runBackgroundJob(job: BackgroundJob, deps: BackgroundJobDependenc
         abortSignal: abortController.signal,
         toolAllow: effectiveToolAllow(job),
         toolDeny: effectiveToolDeny(job),
-        modelOverride: job.model_override ?? undefined,
-        maxToolSteps: job.max_tool_steps ?? JOBS_MAX_TOOL_STEPS,
+        modelOverride: modelOverride ?? undefined,
+        modelMaxOutputTokens,
+        maxToolSteps,
+        disablePlanner,
+        disableResponseValidation,
+        responseValidationMaxRetries,
+        disableMemoryExtraction,
         timeoutMs
       });
       output = execution.output;
@@ -208,6 +279,7 @@ async function runBackgroundJob(job: BackgroundJob, deps: BackgroundJobDependenc
     logger.error({ jobId: job.id, err }, 'Background job failed');
   } finally {
     clearTimeout(timeout);
+    if (progressTimer) clearTimeout(progressTimer);
     inFlightJobs.delete(job.id);
   }
 

@@ -475,6 +475,43 @@ export function getBackgroundJobById(id: string): BackgroundJob | undefined {
   return db.prepare('SELECT * FROM background_jobs WHERE id = ?').get(id) as BackgroundJob | undefined;
 }
 
+export function getBackgroundJobQueuePosition(params: { jobId: string; groupFolder?: string }): { position: number; total: number } | null {
+  const job = getBackgroundJobById(params.jobId);
+  if (!job) return null;
+  const groupClause = params.groupFolder ? 'AND group_folder = ?' : '';
+  const groupArgs = params.groupFolder ? [params.groupFolder] : [];
+  const aheadRow = db.prepare(`
+    SELECT COUNT(*) as count
+    FROM background_jobs
+    WHERE status = 'queued'
+      ${groupClause}
+      AND (priority > ? OR (priority = ? AND created_at < ?))
+  `).get(...groupArgs, job.priority ?? 0, job.priority ?? 0, job.created_at) as { count: number };
+  const totalRow = db.prepare(`
+    SELECT COUNT(*) as count
+    FROM background_jobs
+    WHERE status = 'queued'
+    ${groupClause}
+  `).get(...groupArgs) as { count: number };
+  const ahead = aheadRow?.count || 0;
+  const total = totalRow?.count || 0;
+  return { position: ahead + 1, total };
+}
+
+export function getBackgroundJobQueueDepth(params: { groupFolder?: string; includeRunning?: boolean } = {}): number {
+  const statuses = params.includeRunning ? ['queued', 'running'] : ['queued'];
+  const placeholders = statuses.map(() => '?').join(', ');
+  const groupClause = params.groupFolder ? 'AND group_folder = ?' : '';
+  const args = params.groupFolder ? [...statuses, params.groupFolder] : statuses;
+  const row = db.prepare(`
+    SELECT COUNT(*) as count
+    FROM background_jobs
+    WHERE status IN (${placeholders})
+    ${groupClause}
+  `).get(...args) as { count: number };
+  return row?.count || 0;
+}
+
 export function listBackgroundJobs(params: { groupFolder?: string; status?: BackgroundJobStatus; limit?: number } = {}): BackgroundJob[] {
   const clauses: string[] = [];
   const values: Array<string | number> = [];

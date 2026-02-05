@@ -1,10 +1,11 @@
 import fs from 'fs';
+import path from 'path';
 import {
-  RUNTIME_CONFIG_PATH,
   TRACES_DIR,
   PROMPTS_DIR,
   TOOL_BUDGETS_PATH,
 } from './paths.js';
+import { getDotclawHome } from './paths.js';
 
 export type RuntimeConfig = {
   host: {
@@ -34,6 +35,7 @@ export type RuntimeConfig = {
       tmpfsSize: string;
       runUid: string;
       runGid: string;
+      instanceId: string;
     };
     concurrency: {
       maxAgents: number;
@@ -117,6 +119,12 @@ export type RuntimeConfig = {
       contextModeDefault: 'group' | 'isolated';
       toolAllow: string[];
       toolDeny: string[];
+      progress: {
+        enabled: boolean;
+        startDelayMs: number;
+        intervalMs: number;
+        maxUpdates: number;
+      };
       autoSpawn: {
         enabled: boolean;
         foregroundTimeoutMs: number;
@@ -129,8 +137,59 @@ export type RuntimeConfig = {
           maxOutputTokens: number;
           temperature: number;
           confidenceThreshold: number;
+          adaptive?: {
+            enabled: boolean;
+            minThreshold: number;
+            maxThreshold: number;
+            queueDepthLow: number;
+            queueDepthHigh: number;
+          };
         };
       };
+    };
+    routing: {
+      enabled: boolean;
+      maxFastChars: number;
+      maxStandardChars: number;
+      backgroundMinChars: number;
+      fastKeywords: string[];
+      deepKeywords: string[];
+      backgroundKeywords: string[];
+      classifierFallback: {
+        enabled: boolean;
+        minChars: number;
+      };
+      plannerProbe: {
+        enabled: boolean;
+        model: string;
+        timeoutMs: number;
+        maxOutputTokens: number;
+        temperature: number;
+        minChars: number;
+        minSteps: number;
+        minTools: number;
+      };
+      profiles: Record<string, {
+        model: string;
+        maxOutputTokens: number;
+        maxToolSteps: number;
+        recallMaxResults?: number;
+        recallMaxTokens?: number;
+        enablePlanner: boolean;
+        enableValidation: boolean;
+        responseValidationMaxRetries?: number;
+        enableMemoryRecall: boolean;
+        enableMemoryExtraction: boolean;
+        toolAllow?: string[];
+        toolDeny?: string[];
+        progress?: {
+          enabled?: boolean;
+          initialMs?: number;
+          intervalMs?: number;
+          maxUpdates?: number;
+          messages?: string[];
+        };
+      }>;
     };
     toolBudgets: {
       enabled: boolean;
@@ -199,6 +258,8 @@ export type RuntimeConfig = {
       temperature: number;
       maxRetries: number;
       allowToolCalls: boolean;
+      minPromptTokens: number;
+      minResponseTokens: number;
     };
     tools: {
       maxToolSteps: number;
@@ -226,6 +287,13 @@ export type RuntimeConfig = {
         maxBytes: number;
         httpTimeoutMs: number;
       };
+      progress: {
+        enabled: boolean;
+        minIntervalMs: number;
+        notifyTools: string[];
+        notifyOnStart: boolean;
+        notifyOnError: boolean;
+      };
       toolSummary: {
         enabled: boolean;
         maxBytes: number;
@@ -249,8 +317,10 @@ export type RuntimeConfig = {
   };
 };
 
-// CONFIG_PATH is now imported from paths.js as RUNTIME_CONFIG_PATH
-const CONFIG_PATH = RUNTIME_CONFIG_PATH;
+function resolveRuntimeConfigPath(): string {
+  const base = getDotclawHome();
+  return path.join(base, 'config', 'runtime.json');
+}
 
 const DEFAULT_CONTAINER_TIMEOUT_MS = 900_000;
 const DEFAULT_TELEGRAM_HANDLER_TIMEOUT_MS = Math.max(DEFAULT_CONTAINER_TIMEOUT_MS + 30_000, 120_000);
@@ -282,7 +352,8 @@ const DEFAULT_CONFIG: RuntimeConfig = {
       readOnlyRoot: false,
       tmpfsSize: '64m',
       runUid: typeof process.getuid === 'function' ? String(process.getuid()) : '',
-      runGid: typeof process.getgid === 'function' ? String(process.getgid()) : ''
+      runGid: typeof process.getgid === 'function' ? String(process.getgid()) : '',
+      instanceId: ''
     },
     concurrency: {
       maxAgents: 4,
@@ -346,9 +417,9 @@ const DEFAULT_CONFIG: RuntimeConfig = {
     },
     progress: {
       enabled: true,
-      initialMs: 60_000,
-      intervalMs: 120_000,
-      maxUpdates: 1,
+      initialMs: 12_000,
+      intervalMs: 45_000,
+      maxUpdates: 3,
       messages: []
     },
     heartbeat: {
@@ -372,9 +443,15 @@ const DEFAULT_CONFIG: RuntimeConfig = {
         'mcp__dotclaw__resume_task',
         'mcp__dotclaw__cancel_task'
       ],
+      progress: {
+        enabled: true,
+        startDelayMs: 30_000,
+        intervalMs: 120_000,
+        maxUpdates: 3
+      },
       autoSpawn: {
         enabled: true,
-        foregroundTimeoutMs: 180_000,
+        foregroundTimeoutMs: 90_000,
         onTimeout: true,
         onToolLimit: true,
         classifier: {
@@ -383,7 +460,147 @@ const DEFAULT_CONFIG: RuntimeConfig = {
           timeoutMs: 3000,
           maxOutputTokens: 32,
           temperature: 0,
-          confidenceThreshold: 0.6
+          confidenceThreshold: 0.6,
+          adaptive: {
+            enabled: true,
+            minThreshold: 0.55,
+            maxThreshold: 0.65,
+            queueDepthLow: 0,
+            queueDepthHigh: 4
+          }
+        }
+      }
+    },
+    routing: {
+      enabled: true,
+      maxFastChars: 200,
+      maxStandardChars: 1200,
+      backgroundMinChars: 2000,
+      fastKeywords: [
+        'hi',
+        'hello',
+        'hey',
+        'who are you',
+        'what can you do',
+        'help',
+        'thanks',
+        'thank you'
+      ],
+      deepKeywords: [
+        'research',
+        'analysis',
+        'analyze',
+        'report',
+        'dashboard',
+        'vibe',
+        'refactor',
+        'architecture',
+        'design',
+        'spec',
+        'strategy',
+        'migration',
+        'benchmark',
+        'investigate',
+        'evaluate',
+        'summarize',
+        'long-running'
+      ],
+      backgroundKeywords: [
+        'background',
+        'long-running',
+        'research',
+        'deep dive',
+        'multi-step',
+        'multi step',
+        'dashboard',
+        'refactor',
+        'benchmark',
+        'report',
+        'analysis',
+        'survey',
+        'crawl',
+        'scrape',
+        'codebase'
+      ],
+      classifierFallback: {
+        enabled: true,
+        minChars: 600
+      },
+      plannerProbe: {
+        enabled: true,
+        model: 'openai/gpt-5-nano',
+        timeoutMs: 3000,
+        maxOutputTokens: 120,
+        temperature: 0,
+        minChars: 700,
+        minSteps: 4,
+        minTools: 3
+      },
+      profiles: {
+        fast: {
+          model: 'openai/gpt-5-nano',
+          maxOutputTokens: 256,
+          maxToolSteps: 6,
+          recallMaxResults: 0,
+          recallMaxTokens: 0,
+          enablePlanner: false,
+          enableValidation: false,
+          responseValidationMaxRetries: 0,
+          enableMemoryRecall: false,
+          enableMemoryExtraction: false,
+          toolAllow: [],
+          toolDeny: [],
+          progress: {
+            enabled: false
+          }
+        },
+        standard: {
+          model: 'openai/gpt-5-mini',
+          maxOutputTokens: 768,
+          maxToolSteps: 16,
+          recallMaxResults: 6,
+          recallMaxTokens: 1500,
+          enablePlanner: true,
+          enableValidation: true,
+          responseValidationMaxRetries: 1,
+          enableMemoryRecall: true,
+          enableMemoryExtraction: true,
+          toolAllow: [],
+          toolDeny: []
+        },
+        deep: {
+          model: 'moonshotai/kimi-k2.5',
+          maxOutputTokens: 1536,
+          maxToolSteps: 32,
+          recallMaxResults: 12,
+          recallMaxTokens: 2500,
+          enablePlanner: true,
+          enableValidation: true,
+          responseValidationMaxRetries: 2,
+          enableMemoryRecall: true,
+          enableMemoryExtraction: true,
+          toolAllow: [],
+          toolDeny: []
+        },
+        background: {
+          model: 'moonshotai/kimi-k2.5',
+          maxOutputTokens: 2048,
+          maxToolSteps: 64,
+          recallMaxResults: 16,
+          recallMaxTokens: 4000,
+          enablePlanner: true,
+          enableValidation: true,
+          responseValidationMaxRetries: 2,
+          enableMemoryRecall: true,
+          enableMemoryExtraction: true,
+          toolAllow: [],
+          toolDeny: [],
+          progress: {
+            enabled: true,
+            initialMs: 15_000,
+            intervalMs: 60_000,
+            maxUpdates: 3
+          }
         }
       }
     },
@@ -443,7 +660,7 @@ const DEFAULT_CONFIG: RuntimeConfig = {
     planner: {
       enabled: true,
       mode: 'auto',
-      minTokens: 600,
+      minTokens: 800,
       triggerRegex: '(plan|steps|roadmap|research|design|architecture|spec|strategy)',
       maxOutputTokens: 200,
       temperature: 0.2
@@ -453,7 +670,9 @@ const DEFAULT_CONFIG: RuntimeConfig = {
       maxOutputTokens: 120,
       temperature: 0,
       maxRetries: 1,
-      allowToolCalls: false
+      allowToolCalls: false,
+      minPromptTokens: 400,
+      minResponseTokens: 160
     },
     tools: {
       maxToolSteps: 24,
@@ -481,6 +700,13 @@ const DEFAULT_CONFIG: RuntimeConfig = {
         maxBytes: 800_000,
         httpTimeoutMs: 20_000
       },
+      progress: {
+        enabled: true,
+        minIntervalMs: 30_000,
+        notifyTools: ['WebSearch', 'WebFetch', 'Bash', 'GitClone', 'NpmInstall'],
+        notifyOnStart: true,
+        notifyOnError: true
+      },
       toolSummary: {
         enabled: true,
         maxBytes: 60_000,
@@ -505,6 +731,7 @@ const DEFAULT_CONFIG: RuntimeConfig = {
 };
 
 let cachedConfig: RuntimeConfig | null = null;
+let cachedHome: string | null = null;
 
 function cloneConfig<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
@@ -556,16 +783,18 @@ function readJson(filePath: string): unknown {
 }
 
 export function getRuntimeConfigPath(): string {
-  return CONFIG_PATH;
+  return resolveRuntimeConfigPath();
 }
 
 export function loadRuntimeConfig(): RuntimeConfig {
-  if (cachedConfig) return cachedConfig;
-  const fromFile = readJson(CONFIG_PATH);
+  const currentHome = process.env.DOTCLAW_HOME || null;
+  if (cachedConfig && cachedHome === currentHome) return cachedConfig;
+  const fromFile = readJson(resolveRuntimeConfigPath());
   const merged = fromFile ? mergeDefaults(DEFAULT_CONFIG, fromFile) : cloneConfig(DEFAULT_CONFIG);
   if (!hasTelegramHandlerOverride(fromFile)) {
     merged.host.telegram.handlerTimeoutMs = Math.max(merged.host.container.timeoutMs + 30_000, 120_000);
   }
   cachedConfig = merged;
+  cachedHome = currentHome;
   return merged;
 }

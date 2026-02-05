@@ -48,7 +48,7 @@ npm run doctor
 
 ## Scheduler issues
 
-Confirm `host.timezone` in `~/.dotclaw/config/runtime.json` and restart DotClaw after changes:
+Confirm `host.timezone` (or `TZ`) in `~/.dotclaw/config/runtime.json` and restart DotClaw after changes. This controls both scheduling and how the agent interprets timestamps:
 
 ```bash
 dotclaw restart

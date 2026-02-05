@@ -40,6 +40,11 @@ export interface ContainerInput {
   modelContextTokens?: number;
   modelMaxOutputTokens?: number;
   modelTemperature?: number;
+  timezone?: string;
+  disablePlanner?: boolean;
+  disableResponseValidation?: boolean;
+  responseValidationMaxRetries?: number;
+  disableMemoryExtraction?: boolean;
   streaming?: {
     enabled?: boolean;
     draftId?: number;
@@ -63,6 +68,12 @@ export interface ContainerOutput {
   session_recall_count?: number;
   memory_items_upserted?: number;
   memory_items_extracted?: number;
+  timings?: {
+    planner_ms?: number;
+    response_validation_ms?: number;
+    memory_extraction_ms?: number;
+    tool_ms?: number;
+  };
   tool_calls?: Array<{
     name: string;
     args?: unknown;
