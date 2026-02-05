@@ -899,7 +899,7 @@ export function createTools(
       maxPerRun.set(key.toLowerCase(), value);
     }
   }
-  const defaultMax = policy?.default_max_per_run ?? 12;
+  const defaultMax = policy?.default_max_per_run ?? 64;
   const usageCounts = new Map<string, number>();
 
   const enableBash = runtime.enableBash;

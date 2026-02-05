@@ -35,6 +35,7 @@ const JOBS_TOOL_ALLOW = runtime.host.backgroundJobs.toolAllow;
 const JOBS_TOOL_DENY = runtime.host.backgroundJobs.toolDeny;
 const JOBS_PROGRESS = runtime.host.backgroundJobs.progress;
 const BACKGROUND_PROFILE = runtime.host.routing?.profiles?.background;
+const BACKGROUND_HARD_DENY = ['mcp__dotclaw__spawn_job'];
 
 type JobPolicy = {
   tool_allow?: string[];
@@ -141,7 +142,7 @@ function effectiveToolAllow(job: BackgroundJob): string[] | undefined {
 function effectiveToolDeny(job: BackgroundJob): string[] {
   const policy = coerceJobPolicy(job.tool_policy_json ?? null);
   const deny = Array.isArray(policy.tool_deny) ? policy.tool_deny : [];
-  return [...JOBS_TOOL_DENY, ...deny];
+  return Array.from(new Set([...BACKGROUND_HARD_DENY, ...JOBS_TOOL_DENY, ...deny]));
 }
 
 function ensureJobDir(groupFolder: string, jobId: string): { dir: string; relative: string } {

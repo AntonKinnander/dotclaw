@@ -19,8 +19,8 @@ Example:
   "default": {
     "allow": ["Read", "Write", "Edit", "Glob", "Grep", "WebSearch", "WebFetch", "Bash"],
     "deny": [],
-    "max_per_run": { "Bash": 4, "WebSearch": 5, "WebFetch": 6 },
-    "default_max_per_run": 32
+    "max_per_run": { "Bash": 128, "WebSearch": 40, "WebFetch": 60 },
+    "default_max_per_run": 256
   },
   "groups": {
     "main": { "allow": ["Bash", "WebSearch", "WebFetch"] }
@@ -39,9 +39,10 @@ Example:
 {
   "default": {
     "per_day": {
-      "WebSearch": 50,
-      "WebFetch": 50,
-      "Bash": 20
+      "WebSearch": 1000,
+      "WebFetch": 1500,
+      "Bash": 2000,
+      "Python": 1500
     }
   }
 }

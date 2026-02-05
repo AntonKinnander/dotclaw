@@ -456,7 +456,7 @@ const DEFAULT_CONFIG: RuntimeConfig = {
       pollIntervalMs: 2000,
       maxConcurrent: 2,
       maxRuntimeMs: 2_400_000,
-      maxToolSteps: 64,
+      maxToolSteps: 256,
       inlineMaxChars: 8000,
       contextModeDefault: 'group',
       toolAllow: [],
@@ -465,12 +465,13 @@ const DEFAULT_CONFIG: RuntimeConfig = {
         'mcp__dotclaw__update_task',
         'mcp__dotclaw__pause_task',
         'mcp__dotclaw__resume_task',
-        'mcp__dotclaw__cancel_task'
+        'mcp__dotclaw__cancel_task',
+        'mcp__dotclaw__spawn_job'
       ],
       jobRetentionMs: 604_800_000,
       taskLogRetentionMs: 2_592_000_000,
       progress: {
-        enabled: true,
+        enabled: false,
         startDelayMs: 30_000,
         intervalMs: 120_000,
         maxUpdates: 3
@@ -566,7 +567,7 @@ const DEFAULT_CONFIG: RuntimeConfig = {
         fast: {
           model: 'openai/gpt-5-nano',
           maxOutputTokens: 4096,
-          maxToolSteps: 6,
+          maxToolSteps: 12,
           recallMaxResults: 0,
           recallMaxTokens: 0,
           enablePlanner: false,
@@ -583,7 +584,7 @@ const DEFAULT_CONFIG: RuntimeConfig = {
         standard: {
           model: 'openai/gpt-5-mini',
           maxOutputTokens: 4096,
-          maxToolSteps: 16,
+          maxToolSteps: 48,
           recallMaxResults: 6,
           recallMaxTokens: 1500,
           enablePlanner: true,
@@ -597,7 +598,7 @@ const DEFAULT_CONFIG: RuntimeConfig = {
         deep: {
           model: 'moonshotai/kimi-k2.5',
           maxOutputTokens: 4096,
-          maxToolSteps: 32,
+          maxToolSteps: 128,
           recallMaxResults: 12,
           recallMaxTokens: 2500,
           enablePlanner: true,
@@ -611,7 +612,7 @@ const DEFAULT_CONFIG: RuntimeConfig = {
         background: {
           model: 'moonshotai/kimi-k2.5',
           maxOutputTokens: 4096,
-          maxToolSteps: 64,
+          maxToolSteps: 256,
           recallMaxResults: 16,
           recallMaxTokens: 4000,
           enablePlanner: true,
@@ -631,7 +632,7 @@ const DEFAULT_CONFIG: RuntimeConfig = {
       }
     },
     toolBudgets: {
-      enabled: true,
+      enabled: false,
       path: TOOL_BUDGETS_PATH
     },
     tokenEstimate: {
@@ -701,7 +702,7 @@ const DEFAULT_CONFIG: RuntimeConfig = {
       minResponseTokens: 160
     },
     tools: {
-      maxToolSteps: 24,
+      maxToolSteps: 96,
       outputLimitBytes: 400_000,
       enableBash: true,
       enableWebSearch: true,
@@ -729,9 +730,9 @@ const DEFAULT_CONFIG: RuntimeConfig = {
       progress: {
         enabled: true,
         minIntervalMs: 30_000,
-        notifyTools: ['WebSearch', 'WebFetch', 'Bash', 'GitClone', 'NpmInstall'],
-        notifyOnStart: true,
-        notifyOnError: true
+        notifyTools: [],
+        notifyOnStart: false,
+        notifyOnError: false
       },
       toolSummary: {
         enabled: true,

@@ -33,8 +33,9 @@ title: Runtime Config
       "enabled": true,
       "maxConcurrent": 2,
       "maxRuntimeMs": 2400000,
+      "maxToolSteps": 256,
       "progress": {
-        "enabled": true,
+        "enabled": false,
         "startDelayMs": 30000,
         "intervalMs": 120000,
         "maxUpdates": 3
@@ -56,6 +57,9 @@ title: Runtime Config
         }
       }
     },
+    "toolBudgets": {
+      "enabled": false
+    },
     "routing": {
       "enabled": true,
       "maxFastChars": 200,
@@ -73,10 +77,10 @@ title: Runtime Config
         "minTools": 3
       },
       "profiles": {
-        "fast": { "model": "openai/gpt-5-nano", "maxOutputTokens": 4096, "maxToolSteps": 6, "enablePlanner": false },
-        "standard": { "model": "openai/gpt-5-mini", "maxOutputTokens": 4096, "maxToolSteps": 16 },
-        "deep": { "model": "moonshotai/kimi-k2.5", "maxOutputTokens": 4096, "maxToolSteps": 32 },
-        "background": { "model": "moonshotai/kimi-k2.5", "maxOutputTokens": 4096, "maxToolSteps": 64 }
+        "fast": { "model": "openai/gpt-5-nano", "maxOutputTokens": 4096, "maxToolSteps": 12, "enablePlanner": false },
+        "standard": { "model": "openai/gpt-5-mini", "maxOutputTokens": 4096, "maxToolSteps": 48 },
+        "deep": { "model": "moonshotai/kimi-k2.5", "maxOutputTokens": 4096, "maxToolSteps": 128 },
+        "background": { "model": "moonshotai/kimi-k2.5", "maxOutputTokens": 4096, "maxToolSteps": 256 }
       }
     }
   },
@@ -98,9 +102,9 @@ title: Runtime Config
       "progress": {
         "enabled": true,
         "minIntervalMs": 30000,
-        "notifyTools": ["WebSearch", "WebFetch", "Bash", "GitClone", "NpmInstall"],
-        "notifyOnStart": true,
-        "notifyOnError": true
+        "notifyTools": [],
+        "notifyOnStart": false,
+        "notifyOnError": false
       }
     }
   }
@@ -118,6 +122,7 @@ title: Runtime Config
 - `host.timezone` overrides the scheduler timezone and is passed to the agent so timestamps are interpreted in the correct local time.
 - `host.heartbeat` controls automated heartbeat runs (disable if you don't want background activity).
 - `host.backgroundJobs` controls the background job queue (long-running async work).
+- `host.toolBudgets` controls per-tool daily limits (`tool-budgets.json`) and is disabled by default.
 - `host.messageQueue.maxRetries`, `host.messageQueue.retryBaseMs`, and `host.messageQueue.retryMaxMs` control retry behavior when queued Telegram responses fail to deliver.
 - `host.routing` controls request classification, per-profile model selection, and per-profile limits.
 - `host.trace.dir` and `host.promptPacksDir` control Autotune outputs.
@@ -165,17 +170,17 @@ Example:
       "pollIntervalMs": 2000,
       "maxConcurrent": 2,
       "maxRuntimeMs": 2400000,
-      "maxToolSteps": 64,
+      "maxToolSteps": 256,
       "inlineMaxChars": 8000,
       "contextModeDefault": "group",
       "progress": {
-        "enabled": true,
+        "enabled": false,
         "startDelayMs": 30000,
         "intervalMs": 120000,
         "maxUpdates": 3
       },
       "toolAllow": [],
-      "toolDeny": ["mcp__dotclaw__schedule_task", "mcp__dotclaw__update_task", "mcp__dotclaw__pause_task", "mcp__dotclaw__resume_task", "mcp__dotclaw__cancel_task"],
+      "toolDeny": ["mcp__dotclaw__schedule_task", "mcp__dotclaw__update_task", "mcp__dotclaw__pause_task", "mcp__dotclaw__resume_task", "mcp__dotclaw__cancel_task", "mcp__dotclaw__spawn_job"],
       "autoSpawn": {
         "enabled": true,
         "foregroundTimeoutMs": 90000,

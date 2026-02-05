@@ -620,7 +620,7 @@ function buildSystemInstructions(params: {
     ? 'You are running in the background for a user request. Focus on completing the task and return a complete response without asking follow-up questions unless strictly necessary.'
     : '';
   const jobNote = params.isBackgroundJob
-    ? `You are running as a background job${params.jobId ? ` (job id: ${params.jobId})` : ''}. Return a complete result. If the task will take more than a few minutes, send periodic \`mcp__dotclaw__job_update\` messages with milestones or intermediate findings (roughly every ~5 minutes or after major steps). Prefer writing large outputs to the job artifacts directory.`
+    ? `You are running as a background job${params.jobId ? ` (job id: ${params.jobId})` : ''}. Return a complete result. Do not send routine progress chatter. Only call \`mcp__dotclaw__job_update\` when the user must be notified about a blocker, a required decision, or a critical failure; otherwise rely on the final completion message. Prefer writing large outputs to the job artifacts directory.`
     : '';
   const jobArtifactsNote = params.isBackgroundJob && params.jobId
     ? `Job artifacts directory: /workspace/group/jobs/${params.jobId}`

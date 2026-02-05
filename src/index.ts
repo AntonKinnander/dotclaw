@@ -86,7 +86,8 @@ import { parseAdminCommand } from './admin-commands.js';
 import { loadModelRegistry, saveModelRegistry } from './model-registry.js';
 import { startMetricsServer, stopMetricsServer, recordMessage, recordError, recordRoutingDecision, recordStageLatency } from './metrics.js';
 import { startMaintenanceLoop, stopMaintenanceLoop } from './maintenance.js';
-import { warmGroupContainer, startDaemonHealthCheckLoop, stopDaemonHealthCheckLoop, cleanupInstanceContainers } from './container-runner.js';
+import { warmGroupContainer, startDaemonHealthCheckLoop, stopDaemonHealthCheckLoop, cleanupInstanceContainers, suppressHealthChecks, resetUnhealthyDaemons } from './container-runner.js';
+import { startWakeDetector, stopWakeDetector } from './wake-detector.js';
 import { loadRuntimeConfig } from './runtime-config.js';
 import { invalidatePersonalizationCache } from './personalization.js';
 import { createTraceBase, executeAgentRun, recordAgentTelemetry, AgentExecutionError } from './agent-execution.js';
@@ -196,6 +197,8 @@ type RateLimitEntry = {
 };
 
 const rateLimiter = new Map<string, RateLimitEntry>();
+const JOB_UPDATE_NOTIFY_DEDUP_WINDOW_MS = 120_000;
+const lastJobUpdateNotifications = new Map<string, { message: string; at: number }>();
 
 function checkRateLimit(userId: string): { allowed: boolean; retryAfterMs?: number } {
   const now = Date.now();
@@ -2098,6 +2101,54 @@ function startHeartbeatLoop(): void {
   loop();
 }
 
+async function onWakeRecovery(sleepDurationMs: number): Promise<void> {
+  logger.info({ sleepDurationMs }, 'Running wake recovery');
+
+  // 1. Suppress daemon health check kills for 60s
+  suppressHealthChecks(60_000);
+  resetUnhealthyDaemons();
+
+  // 2. Reconnect Telegram
+  try {
+    setTelegramConnected(false);
+    telegrafBot.stop('WAKE');
+    await sleep(1_000);
+    telegrafBot.launch();
+    setTelegramConnected(true);
+    logger.info('Telegram reconnected after wake');
+  } catch (err) {
+    logger.error({ err }, 'Failed to reconnect Telegram after wake');
+  }
+
+  // 3. Reset stalled messages (1s cutoff spares anything claimed post-wake)
+  try {
+    const resetCount = resetStalledMessages(1_000);
+    if (resetCount > 0) logger.info({ resetCount }, 'Reset stalled messages after wake');
+  } catch (err) {
+    logger.error({ err }, 'Failed to reset stalled messages after wake');
+  }
+
+  // 4. Reset stalled background jobs
+  try {
+    const resetJobCount = resetStalledBackgroundJobs();
+    if (resetJobCount > 0) logger.info({ count: resetJobCount }, 'Re-queued stalled background jobs after wake');
+  } catch (err) {
+    logger.error({ err }, 'Failed to reset stalled background jobs after wake');
+  }
+
+  // 5. Re-drain pending message queues
+  try {
+    const pendingChats = getChatsWithPendingMessages();
+    for (const chatId of pendingChats) {
+      if (registeredGroups[chatId] && !activeDrains.has(chatId)) {
+        void drainQueue(chatId);
+      }
+    }
+  } catch (err) {
+    logger.error({ err }, 'Failed to resume message drains after wake');
+  }
+}
+
 async function processTaskIpc(
   data: {
     type: string;
@@ -2599,9 +2650,17 @@ async function processRequestIpc(
           data: typeof payload.data === 'object' && payload.data ? payload.data as Record<string, unknown> : undefined
         });
         if (result.ok && payload.notify === true && job.chat_jid) {
-          const notifyResult = await sendMessage(job.chat_jid, `Background job ${job.id} update:\n\n${message}`);
-          if (!notifyResult.success) {
-            return { id: requestId, ok: false, error: 'Background job update saved, but notification delivery failed.' };
+          const nowMs = Date.now();
+          const previous = lastJobUpdateNotifications.get(job.id);
+          const isDuplicate = previous !== undefined
+            && previous.message === message
+            && (nowMs - previous.at) < JOB_UPDATE_NOTIFY_DEDUP_WINDOW_MS;
+          if (!isDuplicate) {
+            const notifyResult = await sendMessage(job.chat_jid, `Background job ${job.id} update:\n\n${message}`);
+            if (!notifyResult.success) {
+              return { id: requestId, ok: false, error: 'Background job update saved, but notification delivery failed.' };
+            }
+            lastJobUpdateNotifications.set(job.id, { message, at: nowMs });
           }
         }
         return { id: requestId, ok: result.ok, error: result.error };
@@ -3351,6 +3410,7 @@ async function main(): Promise<void> {
       stopMaintenanceLoop();
       stopHeartbeatLoop();
       stopDaemonHealthCheckLoop();
+      stopWakeDetector();
       stopEmbeddingWorker();
 
       // 3. Stop HTTP servers
@@ -3415,6 +3475,7 @@ async function main(): Promise<void> {
     startMaintenanceLoop();
     startHeartbeatLoop();
     startDaemonHealthCheckLoop(() => registeredGroups, MAIN_GROUP_FOLDER);
+    startWakeDetector((ms) => { void onWakeRecovery(ms); });
 
     logger.info('DotClaw running on Telegram (responds to DMs and group mentions/replies)');
   } catch (error) {

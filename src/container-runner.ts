@@ -530,6 +530,18 @@ export function restartDaemonContainer(group: RegisteredGroup, isMain: boolean):
 let healthCheckInterval: NodeJS.Timeout | null = null;
 const unhealthyDaemons = new Map<string, number>(); // Track consecutive dead checks
 
+// Wake grace period: suppress health check kills after sleep/wake
+let wakeGraceUntil = 0;
+
+export function suppressHealthChecks(durationMs: number): void {
+  wakeGraceUntil = Date.now() + durationMs;
+  logger.info({ durationMs }, 'Health checks suppressed (wake grace period)');
+}
+
+export function resetUnhealthyDaemons(): void {
+  unhealthyDaemons.clear();
+}
+
 /**
  * Perform health check on all daemon containers and restart if needed.
  * Uses 3-state model: healthy resets counter, busy is tolerated up to
@@ -540,6 +552,11 @@ export function performDaemonHealthChecks(
   mainGroupFolder: string
 ): void {
   if (CONTAINER_MODE !== 'daemon') return;
+
+  if (Date.now() < wakeGraceUntil) {
+    logger.debug('Skipping health checks during wake grace period');
+    return;
+  }
 
   const groups = getRegisteredGroups();
 
