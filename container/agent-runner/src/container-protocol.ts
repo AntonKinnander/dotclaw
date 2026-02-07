@@ -36,6 +36,10 @@ export interface ContainerInput {
   modelOverride?: string;
   modelFallbacks?: string[];
   reasoningEffort?: 'off' | 'low' | 'medium' | 'high';
+  modelCapabilities?: {
+    context_length: number;
+    max_completion_tokens?: number;
+  };
   modelContextTokens?: number;
   modelMaxOutputTokens?: number;
   modelTemperature?: number;
@@ -84,6 +88,8 @@ export interface ContainerOutput {
     output_truncated?: boolean;
   }>;
   latency_ms?: number;
+  /** Reply-to message ID parsed from agent output [[reply_to:<id>]] tags */
+  replyToId?: string;
   /** Set by the host container-runner when stdout was truncated before parsing */
   stdoutTruncated?: boolean;
 }

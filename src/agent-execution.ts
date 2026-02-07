@@ -107,6 +107,7 @@ export async function executeAgentRun(params: {
     duration?: number;
     width?: number;
     height?: number;
+    transcript?: string;
   }>;
 }): Promise<{ output: ContainerOutput; context: AgentContext }> {
   const group = params.group;
@@ -128,7 +129,8 @@ export async function executeAgentRun(params: {
     recallMaxTokens: params.recallMaxTokens,
     toolAllow: params.toolAllow,
     toolDeny: params.toolDeny,
-    recallEnabled: params.recallMaxResults > 0 && params.recallMaxTokens > 0
+    recallEnabled: params.recallMaxResults > 0 && params.recallMaxTokens > 0,
+    messageText: params.recallQuery
   });
 
   // Context window guard
@@ -143,9 +145,11 @@ export async function executeAgentRun(params: {
     logger.warn({ model: context.resolvedModel.model, ctxLength }, 'Model context window below 32K — quality may degrade');
   }
 
-  const resolvedMaxOutputTokens = [params.modelMaxOutputTokens, context.resolvedModel.override?.max_output_tokens]
-    .filter((value): value is number => Number.isFinite(value))
-    .reduce((min, value) => Math.min(min, value), Infinity);
+  const outputCandidates = [params.modelMaxOutputTokens, context.resolvedModel.override?.max_output_tokens]
+    .filter((v): v is number => typeof v === 'number' && v > 0);
+  const resolvedMaxOutputTokens = outputCandidates.length > 0
+    ? Math.min(...outputCandidates)
+    : Infinity;
 
   const runContainer = () => runContainerAgent(group, {
     prompt: params.prompt,
@@ -167,6 +171,10 @@ export async function executeAgentRun(params: {
     modelOverride: params.modelOverride || context.resolvedModel.model,
     modelFallbacks: params.modelFallbacks,
     reasoningEffort: params.reasoningEffort,
+    modelCapabilities: {
+      context_length: context.modelCapabilities.context_length,
+      max_completion_tokens: context.modelCapabilities.max_completion_tokens,
+    },
     modelMaxOutputTokens: Number.isFinite(resolvedMaxOutputTokens) ? resolvedMaxOutputTokens : undefined,
     modelContextTokens: context.resolvedModel.override?.context_window,
     modelTemperature: context.resolvedModel.override?.temperature,

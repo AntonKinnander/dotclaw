@@ -14,7 +14,7 @@ import {
 } from './config.js';
 
 // Load .env from the canonical location (~/.dotclaw/.env)
-dotenv.config({ path: ENV_PATH });
+dotenv.config({ path: ENV_PATH, quiet: true } as Parameters<typeof dotenv.config>[0]);
 import { RegisteredGroup, Session, MessageAttachment } from './types.js';
 import {
   initDatabase,
@@ -58,7 +58,7 @@ import { installSkill, removeSkill, listSkills, updateSkill } from './skill-mana
 import { createTraceBase, executeAgentRun, recordAgentTelemetry, AgentExecutionError } from './agent-execution.js';
 import { logger } from './logger.js';
 import { startDashboard, stopDashboard, setTelegramConnected, setLastMessageTime } from './dashboard.js';
-import { routePrompt } from './request-router.js';
+import { routeRequest } from './request-router.js';
 
 // Provider system
 import { ProviderRegistry } from './providers/registry.js';
@@ -66,6 +66,7 @@ import { createTelegramProvider } from './providers/telegram/index.js';
 import type { IncomingMessage, MessagingProvider } from './providers/types.js';
 import { createMessagePipeline, getActiveDrains, getActiveRuns, providerAttachmentToMessageAttachment } from './message-pipeline.js';
 import { startIpcWatcher, stopIpcWatcher } from './ipc-dispatcher.js';
+import { startWebhookServer, stopWebhookServer } from './webhook.js';
 
 const runtime = loadRuntimeConfig();
 
@@ -683,7 +684,7 @@ async function runHeartbeatOnce(): Promise<void> {
     inputText: prompt,
     source: 'dotclaw-heartbeat'
   });
-  const routingDecision = routePrompt(prompt);
+  const routingDecision = routeRequest();
 
   let output: ContainerOutput | null = null;
   let context: AgentContext | null = null;
@@ -702,7 +703,6 @@ async function runHeartbeatOnce(): Promise<void> {
       onSessionUpdate: (sessionId) => { sessions[group.folder] = sessionId; },
       isScheduledTask: true,
       availableGroups: buildAvailableGroupsSnapshot(),
-      modelOverride: routingDecision.model,
       modelMaxOutputTokens: routingDecision.maxOutputTokens,
       maxToolSteps: routingDecision.maxToolSteps,
     });
@@ -1162,6 +1162,20 @@ async function main(): Promise<void> {
   // Start dashboard
   startDashboard();
 
+  // Start webhook server (optional)
+  try {
+    startWebhookServer(runtime.host.webhook, {
+      registeredGroups: () => registeredGroups,
+      sessions: () => sessions,
+      setSession: (folder, id) => {
+        sessions[folder] = id;
+        setGroupSession(folder, id);
+      },
+    });
+  } catch (err) {
+    logger.error({ err }, 'Failed to start webhook server');
+  }
+
   // ──── Start Providers ────
   const handlers = createProviderHandlers(providerRegistry, messagePipeline);
 
@@ -1207,6 +1221,7 @@ async function main(): Promise<void> {
       // 3. Stop HTTP servers
       stopMetricsServer();
       stopDashboard();
+      stopWebhookServer();
 
       // 4. Abort active agent runs so drain loops can finish quickly
       const activeRuns = getActiveRuns();
@@ -1273,12 +1288,16 @@ async function main(): Promise<void> {
 
     logger.info('DotClaw running (responds to DMs and group mentions/replies)');
   } catch (error) {
-    logger.error({ err: error instanceof Error ? error : new Error(String(error)) }, 'Failed to start DotClaw');
+    const msg = error instanceof Error ? error.message : String(error);
+    logger.error({ err: error instanceof Error ? error : new Error(msg) }, 'Failed to start DotClaw');
+    console.error(`[dotclaw] FATAL: ${msg}`);
     process.exit(1);
   }
 }
 
 main().catch(err => {
+  const msg = err instanceof Error ? err.message : String(err);
   logger.error({ err }, 'Failed to start DotClaw');
+  console.error(`[dotclaw] FATAL: ${msg}`);
   process.exit(1);
 });
