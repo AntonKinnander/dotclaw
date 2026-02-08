@@ -68,6 +68,7 @@ title: Runtime Config
 | `defaultModel` | `"moonshotai/kimi-k2.5"` | Default OpenRouter model for requests |
 | `timezone` | System TZ | Timezone for scheduler and agent timestamps |
 | `bind` | `"127.0.0.1"` | Bind address for metrics and dashboard servers |
+| `promptPacksDir` | `~/.dotclaw/prompts` | Directory for Autotune prompt-pack outputs |
 
 ### `host.telegram`
 
@@ -186,6 +187,9 @@ title: Runtime Config
 | `maxBacklog` | `1000` | Maximum pending items in embedding queue |
 | `queryCacheTtlMs` | `600000` (10m) | Query result cache TTL |
 | `queryCacheMax` | `200` | Maximum cached queries |
+| `openrouterBaseUrl` | `"https://openrouter.ai/api/v1"` | Base URL for OpenRouter embedding calls |
+| `openrouterSiteUrl` | `"https://github.com/dotsetlabs/dotclaw"` | OpenRouter attribution URL for embeddings |
+| `openrouterSiteName` | `"DotClaw"` | OpenRouter attribution title for embeddings |
 
 #### `host.memory.maintenance`
 
@@ -218,6 +222,7 @@ title: Runtime Config
 |---------|---------|-------------|
 | `enabled` | `true` | Enable voice message transcription |
 | `model` | `"google/gemini-2.5-flash"` | Transcription model (via OpenRouter) |
+| `baseUrl` | `"https://openrouter.ai/api/v1"` | Base URL for transcription API calls |
 | `language` | `""` | Language hint (empty = auto-detect) |
 | `maxDurationSec` | `300` | Maximum voice message duration |
 
@@ -227,6 +232,7 @@ title: Runtime Config
 |---------|---------|-------------|
 | `enabled` | `true` | Enable text-to-speech |
 | `model` | `"edge-tts"` | TTS engine |
+| `baseUrl` | `""` | Optional custom TTS API base URL |
 | `defaultVoice` | `"en-US-AriaNeural"` | Default voice |
 
 ### `host.progress`
@@ -265,6 +271,7 @@ title: Runtime Config
 
 | Setting | Default | Description |
 |---------|---------|-------------|
+| `dir` | `~/.dotclaw/traces` | Trace directory path |
 | `sampleRate` | `1` | Fraction of requests to trace (0-1) |
 | `retentionDays` | `14` | Days to keep trace files |
 
@@ -273,6 +280,7 @@ title: Runtime Config
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `enabled` | `false` | Enable per-tool daily usage limits |
+| `path` | `~/.dotclaw/config/tool-budgets.json` | Budget file path |
 
 ### `host.tokenEstimate`
 
@@ -387,6 +395,8 @@ A health check endpoint is available at `GET /webhook/health`.
 |---------|---------|-------------|
 | `timeoutMs` | `180000` (3m) | OpenRouter API timeout |
 | `retry` | `true` | Retry failed API calls |
+| `siteUrl` | `"https://github.com/dotsetlabs/dotclaw"` | Attribution URL sent to OpenRouter |
+| `siteName` | `"DotClaw"` | Attribution title sent to OpenRouter |
 
 ### `agent.context`
 
@@ -493,10 +503,10 @@ Sub-models used for auxiliary tasks:
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `enabled` | `true` | Send progress notifications during long tool operations |
-| `minIntervalMs` | `15000` | Minimum interval between progress notifications |
-| `notifyTools` | `["Bash", "WebFetch", "Browser"]` | Tools that trigger progress notifications |
+| `minIntervalMs` | `30000` | Minimum interval between progress notifications |
+| `notifyTools` | `[]` | Tool names that should trigger progress notifications |
 | `notifyOnStart` | `false` | Notify when a tool call starts |
-| `notifyOnError` | `true` | Notify when a tool call errors |
+| `notifyOnError` | `false` | Notify when a tool call errors |
 
 #### `agent.tools.toolSummary`
 
@@ -504,7 +514,7 @@ Sub-models used for auxiliary tasks:
 |---------|---------|-------------|
 | `enabled` | `true` | Summarize large tool outputs |
 | `maxBytes` | `60000` | Threshold for summarization |
-| `maxOutputTokens` | `1024` | Maximum tokens for the summarized output |
+| `maxOutputTokens` | `400` | Maximum tokens for the summarized output |
 | `tools` | `["WebFetch"]` | Tools eligible for summarization |
 
 ### `agent.promptPacks`
@@ -522,6 +532,7 @@ Sub-models used for auxiliary tasks:
 |---------|---------|-------------|
 | `enabled` | `true` | Enable agent-side TTS |
 | `model` | `"edge-tts"` | TTS engine |
+| `baseUrl` | `""` | Optional custom TTS API base URL |
 | `defaultVoice` | `"en-US-AriaNeural"` | Default voice |
 | `provider` | `"edge-tts"` | TTS provider: `edge-tts` or `openai` |
 | `openaiModel` | `"tts-1"` | OpenAI TTS model (when provider is `openai`) |
@@ -602,12 +613,12 @@ Each server entry:
 }
 ```
 
-Supported events: `message:received`, `message:processing`, `message:responded`, `agent:start`, `agent:complete`, `task:fired`, `task:completed`, `memory:upserted`.
+Emitted hook events: `message:received`, `message:processing`, `message:responded`, `agent:start`, `agent:complete`, `task:fired`, `memory:upserted`.
 
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `hooks.enabled` | `false` | Enable lifecycle hooks |
-| `hooks.maxConcurrent` | `4` | Maximum concurrent hook executions. Additional hooks are silently dropped when the limit is reached. |
+| `hooks.maxConcurrent` | `4` | Maximum concurrent hook executions. Additional hooks are skipped when the limit is reached (a warning is logged). |
 | `hooks.defaultTimeoutMs` | `5000` | Default timeout for hook scripts |
 
 Hook scripts receive the event payload as JSON on stdin. The `DOTCLAW_HOOK_EVENT` environment variable is set to the event name (e.g., `message:received`).

@@ -49,7 +49,11 @@ Model resolution follows a priority cascade (highest wins):
 4. `per_user` override for the current user
 5. Routing rules (keyword-based, see below)
 
-The allowlist is enforced at each level — if a resolved model isn't in the allowlist, it falls back to the next level.
+Allowlist behavior:
+
+- If `allowlist` is empty, any model is allowed.
+- If a resolved model is not in `allowlist`, DotClaw falls back to `model` from `model.json`.
+- Routing-rule matches are ignored if their model is not in `allowlist`.
 
 ## Task-type routing rules
 
@@ -74,11 +78,10 @@ Rules are matched by scanning the message text for keywords (case-insensitive). 
 ## Updating the model
 
 - Use `npm run configure` to update the default model and allowlist.
-- From Telegram (main/admin chat), you can set models with commands like:
+- From a registered chat (main/admin for global/group/user scope), use:
 
 ```
-set model to moonshotai/kimi-k2.5
-set model to deepseek/deepseek-v3.2 for group main
-set model to moonshotai/kimi-k2.5 for user 123456789
+/dotclaw set-model moonshotai/kimi-k2.5
+/dotclaw set-model deepseek/deepseek-v3.2 group main
+/dotclaw set-model moonshotai/kimi-k2.5 user 123456789
 ```
-

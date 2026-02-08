@@ -45,6 +45,15 @@ BRAVE_SEARCH_API_KEY=your_brave_search_api_key \
 npm run configure
 ```
 
+Or Discord-only:
+
+```bash
+DOTCLAW_CONFIGURE_NONINTERACTIVE=1 \
+DISCORD_BOT_TOKEN=your_discord_bot_token \
+OPENROUTER_API_KEY=your_openrouter_api_key \
+npm run configure
+```
+
 ## 4. Customize runtime settings (optional)
 
 Edit `~/.dotclaw/config/runtime.json` to tune container behavior, memory, tools, and metrics. See `configuration/runtime` for details.

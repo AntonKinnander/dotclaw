@@ -131,6 +131,7 @@ function buildToolGuidanceSection(params: SystemPromptParams): string {
   const lines = [
     'Key tool rules:',
     '- Never claim file/system/web actions succeeded unless tool calls in this turn confirm them.',
+    '- For large file edits, avoid one giant Write payload; split into smaller Write/Edit steps and verify with Read.',
     '- User attachments arrive in /workspace/group/inbox/ (see <attachment> tags). Process with Read/Bash/Python.',
     '- To send media from the web: download_url → send_photo/send_file/send_audio.',
     '- Charts/plots: matplotlib → savefig → send_photo. Graphviz → dot -Tpng → send_photo.',

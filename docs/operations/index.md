@@ -14,7 +14,7 @@ npm start
 ## Development mode
 
 ```bash
-npm run dev          # Run with hot reload
+npm run dev          # Run from source (tsx)
 npm run dev:up       # Full dev cycle: rebuild container + kill stale daemons + start dev
 npm run dev:down     # Remove all running dotclaw agent containers
 ```

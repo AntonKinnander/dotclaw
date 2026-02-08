@@ -7,7 +7,7 @@ title: Development
 ## Commands
 
 ```bash
-npm run dev          # Run with hot reload (tsx watch)
+npm run dev          # Run from source (tsx)
 npm run dev:up       # Full dev cycle: rebuild container + kill stale daemons + start dev
 npm run dev:down     # Remove all running dotclaw agent containers
 npm run build        # Compile TypeScript (host)
@@ -115,7 +115,7 @@ Key provider interface methods:
 For faster iteration during development, run individual tests:
 
 ```bash
-npm run build && node --test test/*.test.js     # Host tests only
+npm run build && node --test test/**/*.test.js   # Host tests only
 ```
 
 ## Adding a new provider

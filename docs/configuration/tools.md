@@ -36,12 +36,21 @@ Example:
       "mcp__dotclaw__memory_upsert", "mcp__dotclaw__memory_forget",
       "mcp__dotclaw__memory_list", "mcp__dotclaw__memory_search",
       "mcp__dotclaw__memory_stats",
+      "Process", "AnalyzeImage",
       "mcp__dotclaw__get_config", "mcp__dotclaw__set_tool_policy",
       "mcp__dotclaw__set_behavior", "mcp__dotclaw__set_mcp_config",
       "mcp__dotclaw__subagent"
     ],
     "deny": [],
-    "max_per_run": { "Bash": 128, "Python": 64, "WebSearch": 40, "WebFetch": 60 },
+    "max_per_run": {
+      "Bash": 128,
+      "Python": 64,
+      "WebSearch": 40,
+      "WebFetch": 60,
+      "Process": 128,
+      "AnalyzeImage": 16,
+      "mcp__dotclaw__subagent": 8
+    },
     "default_max_per_run": 256
   }
 }
@@ -152,7 +161,7 @@ The agent has access to the following coding tools:
 - `GitClone` — Clone a git repository
 - `PackageInstall` — Install packages using pnpm
 - `Browser` — In-container Chromium automation (navigate, snapshot, click, fill, screenshot, extract, evaluate, close)
-- `AnalyzeImage` — Analyze an image file using a vision-capable model (uses `DOTCLAW_VISION_MODEL` env var, default: `openai/gpt-4o`)
+- `AnalyzeImage` — Analyze an image file using a vision-capable model (uses `DOTCLAW_VISION_MODEL` from container env; default: `openai/gpt-4o`)
 - `Process` — Manage background processes (start, list, poll, log, write, kill, remove). Useful for long-running commands like builds, servers, or data pipelines.
 
 ## Built-in DotClaw tools
@@ -223,9 +232,9 @@ Routing rules example:
 ### Configuration tools (main group only)
 
 - `mcp__dotclaw__get_config` — Inspect current configuration. Optional `section` parameter: `model`, `tools`, `behavior`, `mcp`, `routing`, or `all` (default).
-- `mcp__dotclaw__set_tool_policy` — Modify tool policy. Actions: `allow_tool`, `deny_tool`, `set_limit` (with `tool_name` and optional `limit`), `reset`.
+- `mcp__dotclaw__set_tool_policy` — Modify tool policy. Actions: `allow_tool`, `deny_tool`, `set_limit` (requires `tool_name` and `limit`), `reset`.
 - `mcp__dotclaw__set_behavior` — Adjust agent behavior: `response_style` (`concise`/`balanced`/`detailed`), `tool_calling_bias` (0-1), `caution_bias` (0-1).
-- `mcp__dotclaw__set_mcp_config` — Manage MCP servers. Actions: `enable`, `disable`, `add_server` (with `name`, `command`, `args_list`, `env`), `remove_server` (with `name`). Changes take effect on next daemon restart.
+- `mcp__dotclaw__set_mcp_config` — Manage MCP servers. Actions: `enable`, `disable`, `add_server` (with `name`, `command`, `args_list`, `env`), `remove_server` (with `name`). Changes are picked up on the next agent run.
 
 ### Sub-agents
 

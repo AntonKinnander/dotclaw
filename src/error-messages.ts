@@ -73,16 +73,27 @@ const ERROR_PATTERNS: Array<{ pattern: RegExp | string; message: string }> = [
 
   // Interrupt
   { pattern: /interrupted/i, message: "Got your new message — working on that instead." },
-
-  // Fallback chain exhaustion
-  { pattern: /All models failed/i, message: "All available models are down right now. Please try again in a minute." }
 ];
+
+const DEFAULT_ERROR_MESSAGE = "I ran into an unexpected error. Please try sending your message again.";
+const ALL_MODELS_FAILED_PREFIX = /^All models failed\.\s*Last error:\s*/i;
+
+function unwrapAllModelsFailedMessage(message: string): string | null {
+  if (!ALL_MODELS_FAILED_PREFIX.test(message)) return null;
+  const unwrapped = message.replace(ALL_MODELS_FAILED_PREFIX, '').trim();
+  if (!unwrapped || unwrapped === message) return null;
+  return unwrapped;
+}
 
 /**
  * Convert a technical error to a user-friendly message
  */
 export function humanizeError(error: Error | string): string {
   const message = typeof error === 'string' ? error : error.message;
+  const unwrapped = unwrapAllModelsFailedMessage(message);
+  if (unwrapped) {
+    return humanizeError(unwrapped);
+  }
 
   for (const { pattern, message: friendlyMessage } of ERROR_PATTERNS) {
     if (typeof pattern === 'string') {
@@ -95,7 +106,7 @@ export function humanizeError(error: Error | string): string {
   }
 
   // Default message — include a hint to retry
-  return "I ran into an unexpected error. Please try sending your message again.";
+  return DEFAULT_ERROR_MESSAGE;
 }
 
 /**
@@ -103,6 +114,8 @@ export function humanizeError(error: Error | string): string {
  */
 export function isTransientError(error: Error | string): boolean {
   const message = typeof error === 'string' ? error : error.message;
+  const unwrapped = unwrapAllModelsFailedMessage(message);
+  if (unwrapped) return isTransientError(unwrapped);
   const transientPatterns = [
     'ECONNREFUSED',
     'ETIMEDOUT',
@@ -117,7 +130,6 @@ export function isTransientError(error: Error | string): boolean {
     /timeout|timed out|deadline/i,
     /getResponse.*failed/i,
     /model.?not.?available|no endpoints|provider error/i,
-    /All models failed/i,
     /container.?spawn/i,
     /daemon.?response.*timeout/i
   ];

@@ -23,9 +23,10 @@ Personal OpenRouter-based assistant for Telegram and Discord. Each request runs 
 
 - Node.js 20+
 - Docker (running)
-- Telegram bot token (from @BotFather)
+- At least one provider token:
+  - Telegram bot token (from @BotFather), or
+  - Discord bot token
 - OpenRouter API key
-- Discord bot token (optional — for Discord provider)
 
 ## Quick Start
 
@@ -64,7 +65,10 @@ dotclaw groups       # List registered chats
 dotclaw build        # Build the Docker container image
 dotclaw add-instance # Create and start an isolated instance
 dotclaw instances    # List discovered instances
+dotclaw install-service   # Install launchd/systemd service
+dotclaw uninstall-service # Remove launchd/systemd service
 dotclaw version      # Show installed version
+dotclaw help         # Show help
 ```
 
 Instance flags:
@@ -80,7 +84,7 @@ All configuration and data is stored in `~/.dotclaw/`:
 
 ```
 ~/.dotclaw/
-  .env                    # Secrets (Telegram, OpenRouter keys)
+  .env                    # Secrets (provider tokens, OpenRouter key, optional Brave/GH keys)
   config/
     runtime.json          # Runtime overrides
     model.json            # Model selection
@@ -119,7 +123,7 @@ Or see:
 ## Development
 
 ```bash
-npm run dev          # Run with hot reload
+npm run dev          # Run from source (tsx)
 npm run dev:up       # Full dev cycle: rebuild container + kill stale daemons + start dev
 npm run dev:down     # Remove all running dotclaw agent containers
 npm run build        # Compile TypeScript (host)

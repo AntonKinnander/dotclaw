@@ -25,10 +25,10 @@ Results are filtered by `host.memory.recall.minScore` (default: 0.35) and limite
 
 ## Memory controls
 
-In the main/admin chat:
+Available controls:
 
-- `/dotclaw remember <fact>` - Manually add a memory item
-- `/dotclaw memory <strict|balanced|loose>` - Adjust recall sensitivity
+- `/dotclaw remember <fact>` - Manually add a memory item (main group only)
+- `/dotclaw memory <strict|balanced|loose>` - Adjust per-user recall sensitivity (any registered group)
 
 You can also ask the assistant to recall or summarize what it knows.
 
@@ -37,7 +37,7 @@ You can also ask the assistant to recall or summarize what it knows.
 Memory recall uses a two-stage approach:
 
 1. **FTS5 keyword search**: Full-text search over memory content for fast keyword-based retrieval
-2. **Semantic embeddings** (optional): Vector similarity search using OpenAI-compatible embeddings
+2. **Semantic embeddings** (optional): Vector similarity search using local or OpenRouter-based embeddings
 
 When both signals are available, memories that appear in both keyword and semantic results are boosted in the final ranking. This hybrid approach improves recall accuracy compared to either method alone.
 

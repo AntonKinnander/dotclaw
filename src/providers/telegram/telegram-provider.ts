@@ -754,6 +754,39 @@ export class TelegramProvider implements MessagingProvider {
         });
       }
 
+      if (msg.animation && typeof msg.animation === 'object') {
+        const animation = msg.animation as {
+          file_id: string;
+          file_name?: string;
+          mime_type?: string;
+          file_size?: number;
+          duration?: number;
+          width?: number;
+          height?: number;
+        };
+        const mimeType = typeof animation.mime_type === 'string'
+          ? animation.mime_type
+          : (typeof animation.file_name === 'string' && animation.file_name.toLowerCase().endsWith('.gif')
+            ? 'image/gif'
+            : 'video/mp4');
+        const attachmentType: ProviderAttachment['type'] = mimeType.startsWith('image/')
+          ? 'photo'
+          : 'video';
+        const defaultName = attachmentType === 'photo'
+          ? `animation_${messageId}.gif`
+          : `animation_${messageId}.mp4`;
+        attachments.push({
+          type: attachmentType,
+          providerFileRef: animation.file_id,
+          fileName: animation.file_name || defaultName,
+          mimeType,
+          fileSize: animation.file_size,
+          duration: animation.duration,
+          width: animation.width,
+          height: animation.height,
+        });
+      }
+
       if (msg.document && typeof msg.document === 'object') {
         const doc = msg.document as { file_id: string; file_name?: string; mime_type?: string; file_size?: number };
         attachments.push({
@@ -762,6 +795,39 @@ export class TelegramProvider implements MessagingProvider {
           fileName: doc.file_name || `document_${messageId}`,
           mimeType: doc.mime_type,
           fileSize: doc.file_size,
+        });
+      }
+
+      if (msg.sticker && typeof msg.sticker === 'object') {
+        const sticker = msg.sticker as {
+          file_id: string;
+          file_size?: number;
+          width?: number;
+          height?: number;
+          is_animated?: boolean;
+          is_video?: boolean;
+          emoji?: string;
+        };
+        const attachmentType: ProviderAttachment['type'] = sticker.is_video
+          ? 'video'
+          : (sticker.is_animated ? 'document' : 'photo');
+        const mimeType = sticker.is_video
+          ? 'video/webm'
+          : (sticker.is_animated ? 'application/x-tgsticker' : 'image/webp');
+        const suffix = sticker.emoji ? `_${sticker.emoji.codePointAt(0)?.toString(16) || 'sticker'}` : '';
+        const fileName = attachmentType === 'video'
+          ? `sticker_${messageId}${suffix}.webm`
+          : (attachmentType === 'photo'
+            ? `sticker_${messageId}${suffix}.webp`
+            : `sticker_${messageId}${suffix}.tgs`);
+        attachments.push({
+          type: attachmentType,
+          providerFileRef: sticker.file_id,
+          fileName,
+          mimeType,
+          fileSize: sticker.file_size,
+          width: sticker.width,
+          height: sticker.height,
         });
       }
 
@@ -774,6 +840,20 @@ export class TelegramProvider implements MessagingProvider {
           mimeType: voice.mime_type || 'audio/ogg',
           fileSize: voice.file_size,
           duration: voice.duration,
+        });
+      }
+
+      if (msg.video_note && typeof msg.video_note === 'object') {
+        const note = msg.video_note as { file_id: string; duration?: number; length?: number; file_size?: number };
+        attachments.push({
+          type: 'video',
+          providerFileRef: note.file_id,
+          fileName: `video_note_${messageId}.mp4`,
+          mimeType: 'video/mp4',
+          fileSize: note.file_size,
+          duration: note.duration,
+          width: note.length,
+          height: note.length,
         });
       }
 
@@ -803,7 +883,11 @@ export class TelegramProvider implements MessagingProvider {
         });
       }
 
-      if (!content && attachments.length === 0) return;
+      const dedupedAttachments = attachments.filter((attachment, index, all) => (
+        all.findIndex(candidate => candidate.providerFileRef === attachment.providerFileRef) === index
+      ));
+
+      if (!content && dedupedAttachments.length === 0) return;
 
       const chatType = ctx.chat.type;
       const isGroup = chatType === 'group' || chatType === 'supergroup';
@@ -820,7 +904,7 @@ export class TelegramProvider implements MessagingProvider {
         || ctx.from?.username
         || senderName;
 
-      const storedContent = content || `[${attachments.map(a => a.type).join(', ')}]`;
+      const storedContent = content || `[${dedupedAttachments.map(a => a.type).join(', ')}]`;
 
       const incoming: IncomingMessage = {
         chatId,
@@ -832,7 +916,7 @@ export class TelegramProvider implements MessagingProvider {
         isGroup,
         chatType,
         threadId,
-        attachments: attachments.length > 0 ? attachments : undefined,
+        attachments: dedupedAttachments.length > 0 ? dedupedAttachments : undefined,
         rawProviderData: {
           entities,
           reply_to_message: (msg as { reply_to_message?: unknown }).reply_to_message,

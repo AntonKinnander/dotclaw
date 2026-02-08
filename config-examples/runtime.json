@@ -100,12 +100,12 @@
       },
       "bash": {
         "timeoutMs": 600000
-      },
-      "process": {
-        "maxSessions": 16,
-        "maxOutputBytes": 1048576,
-        "defaultTimeoutMs": 1800000
       }
+    },
+    "process": {
+      "maxSessions": 16,
+      "maxOutputBytes": 1048576,
+      "defaultTimeoutMs": 1800000
     },
     "tts": {
       "provider": "edge-tts",
