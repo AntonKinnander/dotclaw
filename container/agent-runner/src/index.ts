@@ -6,7 +6,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { OpenRouter } from '@openrouter/sdk';
+import { OpenRouter, type ResolvedCallModelInput } from '@openrouter/sdk';
 import { createTools, discoverMcpTools, ToolCallRecord, type ToolResultRecord } from './tools.js';
 import { createIpcHandlers } from './ipc.js';
 import { loadAgentConfig } from './agent-config.js';
@@ -61,6 +61,7 @@ import {
 } from './openrouter-followup.js';
 
 type OpenRouterResult = ReturnType<OpenRouter['callModel']>;
+type OpenRouterResolvedInputArray = Extract<NonNullable<ResolvedCallModelInput['input']>, unknown[]>;
 
 
 const SESSION_ROOT = '/workspace/session';
@@ -1216,17 +1217,16 @@ export async function runAgentOnce(input: ContainerInput): Promise<ContainerOutp
   const sanitizeConversationInput = (
     items: unknown[],
     label: string
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  ): any[] => {
+  ): OpenRouterResolvedInputArray => {
     const sanitized = sanitizeConversationInputForResponses(items);
     if (sanitized.rewrittenCount > 0 || sanitized.droppedCount > 0) {
       log(`Sanitized OpenRouter input (${label}): rewritten=${sanitized.rewrittenCount}, dropped=${sanitized.droppedCount}`);
     }
     if (sanitized.items.length === 0) {
       log(`Sanitized OpenRouter input (${label}) produced empty payload; inserting fallback message`);
-      return [{ role: 'user', content: '[No usable conversation context available.]' }];
+      return [{ role: 'user', content: '[No usable conversation context available.]' }] as OpenRouterResolvedInputArray;
     }
-    return sanitized.items;
+    return sanitized.items as OpenRouterResolvedInputArray;
   };
 
   try {
@@ -1250,14 +1250,13 @@ export async function runAgentOnce(input: ContainerInput): Promise<ContainerOutp
       }
     }
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let contextInput: any[] = messagesToOpenRouterInput(contextMessages);
+    const rawContextInput = messagesToOpenRouterInput(contextMessages);
 
     // Inject vision content into the last user message if images are present.
     // Uses OpenRouter Responses API content part types (input_text/input_image).
     const imageContent = loadImageAttachmentsForInput(input.attachments, { log });
-    injectImagesIntoContextInput(contextInput as ReturnType<typeof messagesToOpenRouterInput>, imageContent);
-    contextInput = sanitizeConversationInput(contextInput, 'context');
+    injectImagesIntoContextInput(rawContextInput, imageContent);
+    const contextInput: OpenRouterResolvedInputArray = sanitizeConversationInput(rawContextInput, 'context');
 
     let lastError: unknown = null;
     for (let attempt = 0; attempt < modelChain.length; attempt++) {
@@ -1280,12 +1279,11 @@ export async function runAgentOnce(input: ContainerInput): Promise<ContainerOutp
         // We use schema-only tools (no execute functions) so the SDK returns tool calls
         // without auto-executing, then run the loop ourselves with full context.
 
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        let conversationInput: any[] = sanitizeConversationInput([...contextInput], 'initial_conversation');
+        let conversationInput: OpenRouterResolvedInputArray = sanitizeConversationInput([...contextInput], 'initial_conversation');
         let step = 0;
 
         // Initial call — uses streaming for real-time delivery
-        conversationInput = sanitizeConversationInput(conversationInput, `initial_call:${currentModel}`) as any[];
+        conversationInput = sanitizeConversationInput(conversationInput, `initial_call:${currentModel}`);
         const initialResult = openrouter.callModel({
           model: currentModel,
           instructions: resolvedInstructions,
@@ -1444,7 +1442,7 @@ export async function runAgentOnce(input: ContainerInput): Promise<ContainerOutp
           }
           conversationInput = [...conversationInput, { role: 'user', content: nudgePrompt }];
           try {
-            conversationInput = sanitizeConversationInput(conversationInput, `tool_nudge:${toolRequirementNudgeAttempt}`) as any[];
+            conversationInput = sanitizeConversationInput(conversationInput, `tool_nudge:${toolRequirementNudgeAttempt}`);
             const nudgeResult = openrouter.callModel({
               model: currentModel,
               instructions: resolvedInstructions,
@@ -1656,7 +1654,7 @@ export async function runAgentOnce(input: ContainerInput): Promise<ContainerOutp
           }
 
           // Follow-up call with complete context — model sees the full conversation
-          conversationInput = sanitizeConversationInput(conversationInput, `tool_followup:${step}`) as any[];
+          conversationInput = sanitizeConversationInput(conversationInput, `tool_followup:${step}`);
           const followupResult = openrouter.callModel({
             model: currentModel,
             instructions: resolvedInstructions,
@@ -1694,7 +1692,7 @@ export async function runAgentOnce(input: ContainerInput): Promise<ContainerOutp
               if (cleared > 0) {
                 log(`Hard-cleared ${cleared} tool results, retrying`);
                 try {
-                  conversationInput = sanitizeConversationInput(conversationInput, `tool_followup_retry:${step}`) as any[];
+                  conversationInput = sanitizeConversationInput(conversationInput, `tool_followup_retry:${step}`);
                   const retryResult = openrouter.callModel({
                     model: currentModel,
                     instructions: resolvedInstructions,
@@ -1760,7 +1758,7 @@ export async function runAgentOnce(input: ContainerInput): Promise<ContainerOutp
           });
           conversationInput = [...conversationInput, { role: 'user', content: continuationPrompt }];
           try {
-            conversationInput = sanitizeConversationInput(conversationInput, `forced_synthesis:${synthesisReason}`) as any[];
+            conversationInput = sanitizeConversationInput(conversationInput, `forced_synthesis:${synthesisReason}`);
             const synthesisResult = openrouter.callModel({
               model: currentModel,
               instructions: resolvedInstructions,
