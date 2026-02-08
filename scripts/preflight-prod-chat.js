@@ -20,6 +20,8 @@ function usage() {
     '  --require-completed <n>         Defaults to 1',
     '  --max-processing-age-sec <n>    Defaults to 120',
     '  --allow-failed                  Don\'t fail on failed queue rows',
+    '  --allow-error-traces            Don\'t fail when trace rows contain error_code',
+    '  --no-require-success-trace      Don\'t require at least one successful trace row',
     '  --no-require-trace              Don\'t require at least one trace row',
     '  --help                          Show this help'
   ].join('\n'));
@@ -35,6 +37,8 @@ function parseArgs(argv) {
     requireCompleted: 1,
     maxProcessingAgeSec: 120,
     allowFailed: false,
+    allowErrorTraces: false,
+    requireSuccessfulTrace: true,
     requireTrace: true
   };
 
@@ -46,6 +50,14 @@ function parseArgs(argv) {
     }
     if (arg === '--allow-failed') {
       parsed.allowFailed = true;
+      continue;
+    }
+    if (arg === '--allow-error-traces') {
+      parsed.allowErrorTraces = true;
+      continue;
+    }
+    if (arg === '--no-require-success-trace') {
+      parsed.requireSuccessfulTrace = false;
       continue;
     }
     if (arg === '--no-require-trace') {
@@ -94,9 +106,14 @@ function listTraceFiles(traceDir, startIso) {
     .map((name) => path.join(traceDir, name));
 }
 
-function countTraceRows({ traceDir, chatJid, startIso }) {
+function summarizeTraceRows({ traceDir, chatJid, startIso }) {
   const startMs = Date.parse(startIso);
-  let count = 0;
+  const stats = {
+    total: 0,
+    success: 0,
+    error: 0,
+    latestError: ''
+  };
   for (const filePath of listTraceFiles(traceDir, startIso)) {
     let content = '';
     try {
@@ -111,13 +128,22 @@ function countTraceRows({ traceDir, chatJid, startIso }) {
         if (row?.chat_id !== chatJid) continue;
         const ts = Date.parse(String(row.timestamp || ''));
         if (!Number.isFinite(ts) || ts < startMs) continue;
-        count += 1;
+        stats.total += 1;
+        const errorCode = typeof row.error_code === 'string' ? row.error_code.trim() : '';
+        if (errorCode) {
+          stats.error += 1;
+          stats.latestError = errorCode;
+          continue;
+        }
+        if (typeof row.output_text === 'string' && row.output_text.trim()) {
+          stats.success += 1;
+        }
       } catch {
         // ignore malformed trace rows
       }
     }
   }
-  return count;
+  return stats;
 }
 
 function getQueueRows(db, chatJid, startIso) {
@@ -190,6 +216,8 @@ async function main() {
   const requireCompleted = clampInt(args.requireCompleted, 1, 1);
   const maxProcessingAgeSec = clampInt(args.maxProcessingAgeSec, 120, 1);
   const allowFailed = !!args.allowFailed;
+  const allowErrorTraces = !!args.allowErrorTraces;
+  const requireSuccessfulTrace = !!args.requireSuccessfulTrace;
   const requireTrace = !!args.requireTrace;
 
   const dbPath = path.join(dotclawHome, 'data', 'store', 'messages.db');
@@ -207,20 +235,23 @@ async function main() {
   console.log(`[preflight] chat=${chatJid}`);
   console.log(`[preflight] dotclawHome=${dotclawHome}`);
   console.log(`[preflight] startIso=${startIso}`);
-  console.log(`[preflight] timeoutSec=${timeoutSec}, pollMs=${pollMs}, requireCompleted=${requireCompleted}, maxProcessingAgeSec=${maxProcessingAgeSec}, requireTrace=${requireTrace}, allowFailed=${allowFailed}`);
+  console.log(`[preflight] timeoutSec=${timeoutSec}, pollMs=${pollMs}, requireCompleted=${requireCompleted}, maxProcessingAgeSec=${maxProcessingAgeSec}, requireTrace=${requireTrace}, requireSuccessfulTrace=${requireSuccessfulTrace}, allowFailed=${allowFailed}, allowErrorTraces=${allowErrorTraces}`);
 
   try {
     while (Date.now() <= deadline) {
       const nowMs = Date.now();
       const rows = getQueueRows(db, chatJid, startIso);
       const { counts, staleProcessing } = summarizeRows(rows, nowMs, maxProcessingAgeSec);
-      const traceCount = requireTrace
-        ? countTraceRows({ traceDir, chatJid, startIso })
-        : 0;
+      const traceStats = (requireTrace || !allowErrorTraces)
+        ? summarizeTraceRows({ traceDir, chatJid, startIso })
+        : { total: 0, success: 0, error: 0, latestError: '' };
 
-      const signature = `${counts.pending}/${counts.processing}/${counts.completed}/${counts.failed}|stale:${staleProcessing.length}|trace:${traceCount}`;
+      const signature = `${counts.pending}/${counts.processing}/${counts.completed}/${counts.failed}|stale:${staleProcessing.length}|trace:${traceStats.total}/${traceStats.success}/${traceStats.error}`;
       if (signature !== lastSignature) {
-        console.log(`[preflight] queue pending=${counts.pending} processing=${counts.processing} completed=${counts.completed} failed=${counts.failed} staleProcessing=${staleProcessing.length}${requireTrace ? ` traces=${traceCount}` : ''}`);
+        const traceSummary = requireTrace
+          ? ` traces(total/success/error)=${traceStats.total}/${traceStats.success}/${traceStats.error}`
+          : '';
+        console.log(`[preflight] queue pending=${counts.pending} processing=${counts.processing} completed=${counts.completed} failed=${counts.failed} staleProcessing=${staleProcessing.length}${traceSummary}`);
         if (rows[0]) {
           const latest = rows[0];
           console.log(`[preflight] latest id=${latest.id} status=${latest.status} message_id=${latest.message_id || 'n/a'} error=${latest.error || 'none'}`);
@@ -240,9 +271,22 @@ async function main() {
         process.exit(1);
       }
 
+      if (!allowErrorTraces && traceStats.error > 0) {
+        console.error('[preflight] FAIL: detected trace rows with error_code.');
+        if (traceStats.latestError) {
+          console.error(`[preflight] latest trace error: ${traceStats.latestError}`);
+        }
+        process.exit(1);
+      }
+
       const completedEnough = counts.completed >= requireCompleted;
-      const traceEnough = !requireTrace || traceCount > 0;
+      const traceEnough = !requireTrace || traceStats.total > 0;
+      const successTraceEnough = !requireTrace || !requireSuccessfulTrace || traceStats.success > 0;
       if (completedEnough && traceEnough) {
+        if (!successTraceEnough) {
+          await sleep(pollMs);
+          continue;
+        }
         console.log('[preflight] PASS: gate conditions satisfied.');
         process.exit(0);
       }

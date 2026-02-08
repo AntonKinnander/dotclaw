@@ -37,9 +37,15 @@ function makeTempDotclawHome() {
   return { home, db };
 }
 
-function appendTrace(home, timestamp, chatId) {
+function appendTrace(home, timestamp, chatId, options = {}) {
   const day = timestamp.slice(0, 10);
   const traceFile = path.join(home, 'traces', `trace-${day}.jsonl`);
+  const outputText = Object.prototype.hasOwnProperty.call(options, 'outputText')
+    ? options.outputText
+    : 'ok';
+  const errorCode = Object.prototype.hasOwnProperty.call(options, 'errorCode')
+    ? options.errorCode
+    : undefined;
   const row = {
     trace_id: 'trace-test',
     timestamp,
@@ -47,7 +53,8 @@ function appendTrace(home, timestamp, chatId) {
     chat_id: chatId,
     group_folder: 'main',
     input_text: 'hello',
-    output_text: 'ok',
+    output_text: outputText,
+    error_code: errorCode,
     model_id: 'test-model',
     source: 'dotclaw'
   };
@@ -160,6 +167,51 @@ test('preflight-prod-chat fails on timeout when no completions arrive', () => {
 
     assert.equal(result.status, 1, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
     assert.match(result.stderr, /timed out waiting for pass conditions/i);
+  } finally {
+    db.close();
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('preflight-prod-chat fails when trace rows include model error', () => {
+  const { home, db } = makeTempDotclawHome();
+  try {
+    const chat = 'discord:1469421941294108713';
+    const now = new Date();
+    const startIso = new Date(now.getTime() - 2_000).toISOString();
+    const createdAt = new Date(now.getTime() - 1_000).toISOString();
+    db.prepare(`
+      INSERT INTO message_queue (
+        chat_jid, message_id, sender_id, sender_name, content, timestamp, status, created_at, started_at, completed_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      chat,
+      'm-err',
+      'user-1',
+      'Greg',
+      'hello',
+      createdAt,
+      'completed',
+      createdAt,
+      createdAt,
+      createdAt
+    );
+    appendTrace(home, createdAt, chat, {
+      outputText: null,
+      errorCode: 'All models failed. Last error: Input validation failed'
+    });
+
+    const result = runPreflight([
+      '--chat', chat,
+      '--dotclaw-home', home,
+      '--start-iso', startIso,
+      '--timeout-sec', '2',
+      '--poll-ms', '50',
+      '--require-completed', '1'
+    ]);
+
+    assert.equal(result.status, 1, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.match(result.stderr, /trace rows with error_code/i);
   } finally {
     db.close();
     fs.rmSync(home, { recursive: true, force: true });

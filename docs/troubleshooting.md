@@ -67,7 +67,7 @@ npm run preflight:prod-chat -- \
   --require-completed 1
 ```
 
-The command exits `0` only when the target chat has a completed queue row (and trace by default) after `--start-iso`/start time, and exits non-zero on failed/stale/timeout conditions.
+The command exits `0` only when the target chat has a completed queue row plus a successful trace row (by default) after `--start-iso`/start time, and exits non-zero on failed/stale/timeout conditions or trace rows containing `error_code`.
 
 ## Diagnostics
 

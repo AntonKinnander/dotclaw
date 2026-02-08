@@ -53,6 +53,7 @@ import {
   injectImagesIntoContextInput,
   loadImageAttachmentsForInput,
   messagesToOpenRouterInput,
+  sanitizeConversationInputForResponses,
 } from './openrouter-input.js';
 import {
   extractFunctionCallsForReplay,
@@ -1212,6 +1213,22 @@ export async function runAgentOnce(input: ContainerInput): Promise<ContainerOutp
     }
   };
 
+  const sanitizeConversationInput = (
+    items: unknown[],
+    label: string
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ): any[] => {
+    const sanitized = sanitizeConversationInputForResponses(items);
+    if (sanitized.rewrittenCount > 0 || sanitized.droppedCount > 0) {
+      log(`Sanitized OpenRouter input (${label}): rewritten=${sanitized.rewrittenCount}, dropped=${sanitized.droppedCount}`);
+    }
+    if (sanitized.items.length === 0) {
+      log(`Sanitized OpenRouter input (${label}) produced empty payload; inserting fallback message`);
+      return [{ role: 'user', content: '[No usable conversation context available.]' }];
+    }
+    return sanitized.items;
+  };
+
   try {
     const { instructions: resolvedInstructions, instructionsTokens: resolvedInstructionTokens, contextMessages } = buildContext();
     // Apply 1.3x safety margin to account for token estimation inaccuracy.
@@ -1233,12 +1250,14 @@ export async function runAgentOnce(input: ContainerInput): Promise<ContainerOutp
       }
     }
 
-    const contextInput = messagesToOpenRouterInput(contextMessages);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let contextInput: any[] = messagesToOpenRouterInput(contextMessages);
 
     // Inject vision content into the last user message if images are present.
     // Uses OpenRouter Responses API content part types (input_text/input_image).
     const imageContent = loadImageAttachmentsForInput(input.attachments, { log });
-    injectImagesIntoContextInput(contextInput, imageContent);
+    injectImagesIntoContextInput(contextInput as ReturnType<typeof messagesToOpenRouterInput>, imageContent);
+    contextInput = sanitizeConversationInput(contextInput, 'context');
 
     let lastError: unknown = null;
     for (let attempt = 0; attempt < modelChain.length; attempt++) {
@@ -1262,10 +1281,11 @@ export async function runAgentOnce(input: ContainerInput): Promise<ContainerOutp
         // without auto-executing, then run the loop ourselves with full context.
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        let conversationInput: any[] = [...contextInput];
+        let conversationInput: any[] = sanitizeConversationInput([...contextInput], 'initial_conversation');
         let step = 0;
 
         // Initial call — uses streaming for real-time delivery
+        conversationInput = sanitizeConversationInput(conversationInput, `initial_call:${currentModel}`) as any[];
         const initialResult = openrouter.callModel({
           model: currentModel,
           instructions: resolvedInstructions,
@@ -1424,6 +1444,7 @@ export async function runAgentOnce(input: ContainerInput): Promise<ContainerOutp
           }
           conversationInput = [...conversationInput, { role: 'user', content: nudgePrompt }];
           try {
+            conversationInput = sanitizeConversationInput(conversationInput, `tool_nudge:${toolRequirementNudgeAttempt}`) as any[];
             const nudgeResult = openrouter.callModel({
               model: currentModel,
               instructions: resolvedInstructions,
@@ -1635,6 +1656,7 @@ export async function runAgentOnce(input: ContainerInput): Promise<ContainerOutp
           }
 
           // Follow-up call with complete context — model sees the full conversation
+          conversationInput = sanitizeConversationInput(conversationInput, `tool_followup:${step}`) as any[];
           const followupResult = openrouter.callModel({
             model: currentModel,
             instructions: resolvedInstructions,
@@ -1672,6 +1694,7 @@ export async function runAgentOnce(input: ContainerInput): Promise<ContainerOutp
               if (cleared > 0) {
                 log(`Hard-cleared ${cleared} tool results, retrying`);
                 try {
+                  conversationInput = sanitizeConversationInput(conversationInput, `tool_followup_retry:${step}`) as any[];
                   const retryResult = openrouter.callModel({
                     model: currentModel,
                     instructions: resolvedInstructions,
@@ -1737,6 +1760,7 @@ export async function runAgentOnce(input: ContainerInput): Promise<ContainerOutp
           });
           conversationInput = [...conversationInput, { role: 'user', content: continuationPrompt }];
           try {
+            conversationInput = sanitizeConversationInput(conversationInput, `forced_synthesis:${synthesisReason}`) as any[];
             const synthesisResult = openrouter.callModel({
               model: currentModel,
               instructions: resolvedInstructions,
@@ -1841,10 +1865,11 @@ export async function runAgentOnce(input: ContainerInput): Promise<ContainerOutp
             keepRecentCount: Math.max(1, toKeep.length)
           }).retryInput;
           try {
+            const sanitizedCompactedInput = sanitizeConversationInput(compactedInput, 'context_overflow_retry');
             const retryResult = openrouter.callModel({
               model: currentModel,
               instructions: minInstructions,
-              input: compactedInput,
+              input: sanitizedCompactedInput,
               tools: schemaTools,
               maxOutputTokens: effectiveMaxOutputTokens,
               temperature: config.temperature,
