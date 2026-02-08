@@ -59,10 +59,10 @@ All runtime data is stored in `~/.dotclaw` (configurable via `DOTCLAW_HOME` envi
     main/CLAUDE.md        Main group memory
     global/CLAUDE.md      Global memory
     <group>/CLAUDE.md     Group memory
-    <group>/inbox/        Downloaded incoming Telegram media
+    <group>/inbox/        Downloaded incoming provider attachments
     <group>/downloads/    Files downloaded by mcp__dotclaw__download_url
   logs/
   prompts/
   traces/
-  .env                    Secrets (Telegram, OpenRouter keys)
+  .env                    Secrets (provider tokens, OpenRouter key, optional Brave/GH keys)
 ```

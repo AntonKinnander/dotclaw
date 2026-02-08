@@ -15,11 +15,11 @@ DotClaw is designed for macOS and Linux hosts with Docker installed.
 ## Accounts and keys
 
 - **OpenRouter API key** — required for all LLM calls
-- **Telegram bot token** — create one via [@BotFather](https://t.me/BotFather) (see [Telegram Setup](telegram-setup.md))
-- **Discord bot token** (optional) — create via the [Discord Developer Portal](https://discord.com/developers/applications) with Message Content Intent enabled (see [Discord Setup](discord-setup.md))
+- **Telegram bot token** (if using Telegram) — create one via [@BotFather](https://t.me/BotFather) (see [Telegram Setup](telegram-setup.md))
+- **Discord bot token** (if using Discord) — create via the [Discord Developer Portal](https://discord.com/developers/applications) with Message Content Intent enabled (see [Discord Setup](discord-setup.md))
 - **Brave Search API key** (optional) — enables the WebSearch tool
 
-At least one messaging provider (Telegram or Discord) must be configured.
+You must configure at least one provider token (`TELEGRAM_BOT_TOKEN` or `DISCORD_BOT_TOKEN`).
 
 ## Optional dependencies
 

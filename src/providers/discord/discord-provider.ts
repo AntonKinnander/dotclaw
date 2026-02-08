@@ -51,6 +51,23 @@ function getRetryAfterMs(err: unknown): number | null {
   return null;
 }
 
+function inferMimeTypeFromFilename(fileName?: string): string | null {
+  if (!fileName || typeof fileName !== 'string') return null;
+  const lower = fileName.toLowerCase();
+  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+  if (lower.endsWith('.png')) return 'image/png';
+  if (lower.endsWith('.gif')) return 'image/gif';
+  if (lower.endsWith('.webp')) return 'image/webp';
+  if (lower.endsWith('.mp4')) return 'video/mp4';
+  if (lower.endsWith('.webm')) return 'video/webm';
+  if (lower.endsWith('.mov')) return 'video/quicktime';
+  if (lower.endsWith('.mp3')) return 'audio/mpeg';
+  if (lower.endsWith('.wav')) return 'audio/wav';
+  if (lower.endsWith('.ogg')) return 'audio/ogg';
+  if (lower.endsWith('.m4a')) return 'audio/mp4';
+  return null;
+}
+
 export interface DiscordProviderConfig {
   token: string;
   sendRetries: number;
@@ -537,7 +554,11 @@ export class DiscordProvider implements MessagingProvider {
         if (message.attachments && message.attachments.size > 0) {
           for (const [, attachment] of message.attachments) {
             let type: ProviderAttachment['type'] = 'document';
-            const contentType: string = attachment.contentType || '';
+            const contentType: string = (
+              attachment.contentType
+              || inferMimeTypeFromFilename(attachment.name)
+              || ''
+            ).toLowerCase();
             if (contentType.startsWith('image/')) type = 'photo';
             else if (contentType.startsWith('video/')) type = 'video';
             else if (contentType.startsWith('audio/')) {
@@ -558,7 +579,46 @@ export class DiscordProvider implements MessagingProvider {
           }
         }
 
-        if (!content && attachments.length === 0) return;
+        if (message.stickers && message.stickers.size > 0) {
+          for (const [, sticker] of message.stickers) {
+            const providerFileRef = typeof sticker.url === 'string' ? sticker.url : '';
+            if (!providerFileRef) continue;
+            const stickerFormat = typeof sticker.format === 'number'
+              ? sticker.format
+              : (typeof sticker.formatType === 'number' ? sticker.formatType : null);
+            let type: ProviderAttachment['type'] = 'document';
+            let mimeType: string | undefined;
+            let ext = 'dat';
+            if (stickerFormat === 1 || stickerFormat === 2) {
+              type = 'photo';
+              mimeType = 'image/png';
+              ext = 'png';
+            } else if (stickerFormat === 4) {
+              type = 'photo';
+              mimeType = 'image/gif';
+              ext = 'gif';
+            } else if (stickerFormat === 3) {
+              type = 'document';
+              mimeType = 'application/json';
+              ext = 'json';
+            }
+            const stickerName = typeof sticker.name === 'string' && sticker.name.trim()
+              ? sticker.name.trim().replace(/[^a-zA-Z0-9._-]/g, '_')
+              : `sticker_${messageId}`;
+            attachments.push({
+              type,
+              providerFileRef,
+              fileName: `${stickerName}.${ext}`,
+              mimeType,
+            });
+          }
+        }
+
+        const dedupedAttachments = attachments.filter((attachment, index, all) => (
+          all.findIndex(candidate => candidate.providerFileRef === attachment.providerFileRef) === index
+        ));
+
+        if (!content && dedupedAttachments.length === 0) return;
 
         const isDM = message.channel.type === this.channelTypeDM;
         const isGroup = !isDM;
@@ -572,7 +632,7 @@ export class DiscordProvider implements MessagingProvider {
           ? (message.author.displayName || message.author.username || senderName)
           : (message.guild?.name || senderName);
 
-        const storedContent = content || `[${attachments.map(a => a.type).join(', ')}]`;
+        const storedContent = content || `[${dedupedAttachments.map(a => a.type).join(', ')}]`;
 
         // Build referenced message info for isBotReplied
         let referencedMessage: { author?: { id?: string } } | undefined;
@@ -595,7 +655,7 @@ export class DiscordProvider implements MessagingProvider {
           isGroup,
           chatType,
           threadId,
-          attachments: attachments.length > 0 ? attachments : undefined,
+          attachments: dedupedAttachments.length > 0 ? dedupedAttachments : undefined,
           rawProviderData: {
             referencedMessage,
             chatName,

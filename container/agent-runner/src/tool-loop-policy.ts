@@ -527,6 +527,23 @@ export function normalizeToolCallArguments(params: {
   return { arguments: raw, malformedReason: 'unsupported argument type' };
 }
 
+export function buildMalformedArgumentsRecoveryHint(params: {
+  toolName: string;
+  malformedReason?: string;
+}): string | null {
+  const toolName = String(params.toolName || '').trim().toLowerCase();
+  const reason = String(params.malformedReason || '').trim().toLowerCase();
+  if (!reason) return null;
+
+  const looksTruncated = reason.includes('truncated') || reason.includes('malformed json');
+  if (!looksTruncated) return null;
+
+  if (toolName === 'write' || toolName === 'edit') {
+    return 'Retry with smaller file chunks (for example <=2000 chars per call) and apply multiple Write/Edit steps.';
+  }
+  return 'Retry with shorter tool arguments or split the action into multiple tool calls.';
+}
+
 function compactLine(text: string, maxChars: number): string {
   const normalized = text.replace(/\s+/g, ' ').trim();
   if (normalized.length <= maxChars) return normalized;

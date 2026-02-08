@@ -12,12 +12,13 @@ Run `docker info` to confirm Docker is running. On macOS, start Docker Desktop. 
 
 Check `~/.dotclaw/.env` for:
 
-- `TELEGRAM_BOT_TOKEN`
 - `OPENROUTER_API_KEY`
+- at least one provider token:
+  - `TELEGRAM_BOT_TOKEN`, or
+  - `DISCORD_BOT_TOKEN`
 
 Optional:
 
-- `DISCORD_BOT_TOKEN`
 - `BRAVE_SEARCH_API_KEY`
 
 ## Permission errors on ~/.dotclaw/

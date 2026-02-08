@@ -61,7 +61,7 @@ DotClaw can connect to MCP (Model Context Protocol) servers using stdio transpor
 
 ## Hooks
 
-Lifecycle hooks let you run custom scripts when events occur (message received, agent started, task completed, etc.). Hooks can be blocking (awaited, with optional cancellation) or async (fire-and-forget). Configure in `hooks` in runtime config.
+Lifecycle hooks let you run custom scripts when events occur (message received, message processing, agent start/complete, task fired, memory upserted). Hooks can be blocking (awaited, with optional cancellation) or async (fire-and-forget). Configure in `hooks` in runtime config.
 
 ## Model fallback chain
 
@@ -73,7 +73,7 @@ Control how much internal reasoning the model uses via `agent.reasoning.effort`:
 
 ## Image and vision
 
-DotClaw supports multi-modal input. When a user sends a photo, the agent receives it as base64-encoded image content alongside the text message. The agent can describe, analyze, or act on images. Supported formats: JPEG, PNG, GIF, WebP (up to 5 MB).
+DotClaw supports multi-modal input. When a user sends a photo, the agent receives image content alongside text and can analyze it. The `AnalyzeImage` tool supports common image formats (JPEG/PNG/GIF/WebP/BMP). Effective size limits are bounded by provider attachment limits and model/API constraints.
 
 ## Message interrupt
 
@@ -85,7 +85,7 @@ If a request is taking too long, you can send `cancel`, `stop`, or `abort` in th
 
 ## Rate limiting
 
-DotClaw enforces a per-user rate limit of 20 messages per 60-second window. If a user exceeds this limit, their messages are silently dropped until the window resets. This prevents runaway message floods from overwhelming the agent pipeline.
+DotClaw enforces a per-user rate limit of 20 messages per 60-second window. If a user exceeds this limit, DotClaw replies with a retry-after message and skips processing until the window resets.
 
 ## Sub-agents
 
@@ -102,7 +102,13 @@ When conversation history approaches the model's context window limit, DotClaw a
 
 ## Model cooldowns
 
-When a model returns a rate limit (429) or server error (5xx/timeout), it enters a cooldown period (60s for rate limits, 300s for server errors). During cooldown, the model is skipped in the fallback chain unless it's the last resort. This prevents hammering an overloaded endpoint.
+When a model fails, DotClaw applies host-level cooldowns before retrying that model:
+
+- rate limits (429): 60 seconds by default
+- transient transport/overload errors: 300 seconds by default
+- timeout-class failures: stricter cooldown shaping (minimum 15 minutes, capped at 6 hours)
+
+During cooldown, the model is skipped in the fallback chain unless no alternative remains.
 
 ## Task-type routing
 

@@ -95,6 +95,11 @@ test('humanizeError accepts Error objects', () => {
   assert.ok(msg.includes('trouble connecting'));
 });
 
+test('humanizeError unwraps all-models-failed wrapper to classify root cause', () => {
+  const msg = humanizeError('All models failed. Last error: Input validation failed: invalid request');
+  assert.ok(msg.includes('request format'), msg);
+});
+
 // --- isTransientError ---
 
 test('isTransientError returns true for ECONNREFUSED', () => {
@@ -135,6 +140,20 @@ test('isTransientError returns true for 503', () => {
 
 test('isTransientError returns true for 504', () => {
   assert.equal(isTransientError('HTTP 504 Gateway Timeout'), true);
+});
+
+test('isTransientError treats wrapped all-models-failed transient causes as transient', () => {
+  assert.equal(
+    isTransientError('All models failed. Last error: HTTP 503 Service Unavailable'),
+    true
+  );
+});
+
+test('isTransientError treats wrapped all-models-failed deterministic validation as non-transient', () => {
+  assert.equal(
+    isTransientError('All models failed. Last error: Input validation failed: Invalid input'),
+    false
+  );
 });
 
 test('isTransientError returns false for auth errors', () => {

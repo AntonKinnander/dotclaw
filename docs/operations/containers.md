@@ -44,8 +44,8 @@ Set this in `~/.dotclaw/config/runtime.json`:
 
 ## Browser automation
 
-The container image includes `agent-browser`, which can be invoked via the `Bash` tool
-for interactive web automation (open, snapshot, click, fill, screenshot).
+The container image includes Chromium automation exposed through the `Browser` tool
+(`navigate`, `snapshot`, `click`, `fill`, `screenshot`, `extract`, `evaluate`, `close`).
 
 ## Resource limits
 

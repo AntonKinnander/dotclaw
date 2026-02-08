@@ -10,6 +10,7 @@ import {
   normalizeToolCallArguments,
   parseCreateReadFileInstruction,
   parseListReadNewestInstruction,
+  buildMalformedArgumentsRecoveryHint,
   shouldRetryIdempotentToolCall,
   normalizeToolCallSignature,
   normalizeToolRoundSignature,
@@ -248,4 +249,24 @@ test('parseListReadNewestInstruction extracts deterministic list/read instructio
 
   const missing = parseListReadNewestInstruction('Create file "inbox/demo.txt" with 2 lines: a, b.');
   assert.equal(missing, null);
+});
+
+test('buildMalformedArgumentsRecoveryHint advises chunking for write/edit truncation', () => {
+  const writeHint = buildMalformedArgumentsRecoveryHint({
+    toolName: 'Write',
+    malformedReason: 'malformed JSON arguments (possibly truncated)'
+  });
+  assert.match(String(writeHint), /smaller file chunks/i);
+
+  const genericHint = buildMalformedArgumentsRecoveryHint({
+    toolName: 'WebFetch',
+    malformedReason: 'malformed JSON arguments (possibly truncated)'
+  });
+  assert.match(String(genericHint), /shorter tool arguments/i);
+
+  const none = buildMalformedArgumentsRecoveryHint({
+    toolName: 'Write',
+    malformedReason: 'arguments must be an object'
+  });
+  assert.equal(none, null);
 });

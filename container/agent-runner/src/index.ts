@@ -40,6 +40,7 @@ import {
   buildToolOutcomeFallback,
   compactToolConversationItems,
   detectToolExecutionRequirement,
+  buildMalformedArgumentsRecoveryHint,
   isNonRetryableToolError,
   normalizeToolCallArguments,
   normalizeToolCallSignature,
@@ -48,6 +49,11 @@ import {
   parseListReadNewestInstruction,
   shouldRetryIdempotentToolCall,
 } from './tool-loop-policy.js';
+import {
+  injectImagesIntoContextInput,
+  loadImageAttachmentsForInput,
+  messagesToOpenRouterInput,
+} from './openrouter-input.js';
 
 type OpenRouterResult = ReturnType<OpenRouter['callModel']>;
 
@@ -511,55 +517,6 @@ function loadClaudeNotes(): { group: string | null; global: string | null } {
     group: readTextFileLimited(GROUP_CLAUDE_PATH, CLAUDE_NOTES_MAX_CHARS),
     global: readTextFileLimited(GLOBAL_CLAUDE_PATH, CLAUDE_NOTES_MAX_CHARS)
   };
-}
-
-
-// ── Image/Vision support ──────────────────────────────────────────────
-
-const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // 5MB per image
-const MAX_TOTAL_IMAGE_BYTES = 20 * 1024 * 1024; // 20MB total across all images
-const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
-
-function loadImageAttachments(attachments?: ContainerInput['attachments']): Array<{
-  type: 'image_url';
-  image_url: { url: string };
-}> {
-  if (!attachments) return [];
-  const images: Array<{ type: 'image_url'; image_url: { url: string } }> = [];
-  let totalBytes = 0;
-  for (const att of attachments) {
-    if (att.type !== 'photo') continue;
-    const mime = att.mime_type || 'image/jpeg';
-    if (!IMAGE_MIME_TYPES.has(mime)) continue;
-    try {
-      const stat = fs.statSync(att.path);
-      if (stat.size > MAX_IMAGE_BYTES) {
-        log(`Skipping image ${att.path}: ${stat.size} bytes exceeds ${MAX_IMAGE_BYTES}`);
-        continue;
-      }
-      if (totalBytes + stat.size > MAX_TOTAL_IMAGE_BYTES) {
-        log(`Skipping image ${att.path}: cumulative size would exceed ${MAX_TOTAL_IMAGE_BYTES}`);
-        break;
-      }
-      const data = fs.readFileSync(att.path);
-      totalBytes += data.length;
-      const b64 = data.toString('base64');
-      images.push({
-        type: 'image_url',
-        image_url: { url: `data:${mime};base64,${b64}` }
-      });
-    } catch (err) {
-      log(`Failed to load image ${att.path}: ${err instanceof Error ? err.message : err}`);
-    }
-  }
-  return images;
-}
-
-function messagesToOpenRouter(messages: Message[]) {
-  return messages.map(message => ({
-    role: message.role,
-    content: message.content
-  }));
 }
 
 function clampContextMessages(messages: Message[], tokensPerChar: number, maxTokens: number): Message[] {
@@ -1287,21 +1244,12 @@ export async function runAgentOnce(input: ContainerInput): Promise<ContainerOutp
       }
     }
 
-    const contextInput = messagesToOpenRouter(contextMessages);
+    const contextInput = messagesToOpenRouterInput(contextMessages);
 
-    // Inject vision content into the last user message if images are present
-    const imageContent = loadImageAttachments(input.attachments);
-    if (imageContent.length > 0 && contextInput.length > 0) {
-      const lastMsg = contextInput[contextInput.length - 1];
-      if (lastMsg.role === 'user') {
-        // Convert string content to multi-modal content array
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (lastMsg as any).content = [
-          { type: 'text', text: typeof lastMsg.content === 'string' ? lastMsg.content : '' },
-          ...imageContent
-        ];
-      }
-    }
+    // Inject vision content into the last user message if images are present.
+    // Uses OpenRouter Responses API content part types (input_text/input_image).
+    const imageContent = loadImageAttachmentsForInput(input.attachments, { log });
+    injectImagesIntoContextInput(contextInput, imageContent);
 
     let lastError: unknown = null;
     for (let attempt = 0; attempt < modelChain.length; attempt++) {
@@ -1563,7 +1511,13 @@ export async function runAgentOnce(input: ContainerInput): Promise<ContainerOutp
               rawArguments: fc.arguments
             });
             if (normalizedArgs.malformedReason) {
-              const error = `Malformed arguments for ${fc.name}: ${normalizedArgs.malformedReason}`;
+              const recoveryHint = buildMalformedArgumentsRecoveryHint({
+                toolName: fc.name,
+                malformedReason: normalizedArgs.malformedReason
+              });
+              const error = recoveryHint
+                ? `Malformed arguments for ${fc.name}: ${normalizedArgs.malformedReason}. ${recoveryHint}`
+                : `Malformed arguments for ${fc.name}: ${normalizedArgs.malformedReason}`;
               toolResults.push({
                 type: 'function_call_output',
                 callId: fc.id,

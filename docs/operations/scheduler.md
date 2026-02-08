@@ -46,7 +46,7 @@ Recurring tasks use fresh sessions for each run, so a failure in one run doesn't
 
 ## Task parameters
 
-When creating or updating tasks via the `mcp__dotclaw__schedule_task` and `mcp__dotclaw__update_task` tools:
+`mcp__dotclaw__schedule_task` parameters:
 
 | Parameter | Description |
 |-----------|-------------|
@@ -56,6 +56,17 @@ When creating or updating tasks via the `mcp__dotclaw__schedule_task` and `mcp__
 | `timezone` | Optional IANA timezone override (e.g. `"America/New_York"`) |
 | `context_mode` | `group` (default, runs in the group's session context) or `isolated` (fresh context each run) |
 | `target_group` | Run the task in a different group's context (main group only) |
+
+`mcp__dotclaw__update_task` parameters:
+
+| Parameter | Description |
+|-----------|-------------|
+| `task_id` | Task ID to update |
+| `prompt` | Replace task prompt |
+| `schedule_type` / `schedule_value` | Replace schedule definition |
+| `timezone` | Update IANA timezone override |
+| `context_mode` | Set `group` or `isolated` |
+| `status` | Set `active`, `paused`, or `completed` |
 | `state_json` | Persistent JSON state string that carries across task runs. Useful for tasks that need to track progress between executions. |
 
 ## Targeting other groups

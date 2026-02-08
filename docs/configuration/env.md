@@ -12,16 +12,20 @@ The `.env` file must be placed at `~/.dotclaw/.env` (or `$DOTCLAW_HOME/.env` if 
 
 ## Required
 
-- `TELEGRAM_BOT_TOKEN`
 - `OPENROUTER_API_KEY`
+- at least one provider token:
+  - `TELEGRAM_BOT_TOKEN`, or
+  - `DISCORD_BOT_TOKEN`
 
 ## Optional
 
-- `DISCORD_BOT_TOKEN` (enables Discord provider)
 - `BRAVE_SEARCH_API_KEY` (enables WebSearch)
 - `TZ` (override host timezone; affects scheduler timing and agent timestamp interpretation)
-- `DOTCLAW_HOME` (override config/data directory, default: `~/.dotclaw`)
-- `DOTCLAW_VISION_MODEL` (model for the `AnalyzeImage` tool, default: `openai/gpt-4o`)
+- `GH_TOKEN` (enables `gh` usage in agent containers)
+
+Container-only env overrides (for example `DOTCLAW_VISION_MODEL` or `OPENAI_API_KEY`) should be set per group in `~/.dotclaw/data/registered_groups.json` under `containerConfig.env`.
+
+`DOTCLAW_HOME` is a process-level environment variable and should be set in your shell or service unit, not in `.env`.
 
 ## Example
 
@@ -30,6 +34,7 @@ TELEGRAM_BOT_TOKEN=123456789:replace-with-real-token
 OPENROUTER_API_KEY=sk-or-replace-with-real-key
 DISCORD_BOT_TOKEN=replace-with-discord-token
 BRAVE_SEARCH_API_KEY=replace-with-brave-key
+GH_TOKEN=ghp_your_token
 ```
 
 ## Non-interactive setup variables
@@ -44,3 +49,4 @@ These are read by `npm run bootstrap` and `npm run configure` when running non-i
 - `DOTCLAW_BOOTSTRAP_GROUP_FOLDER`
 - `DOTCLAW_BOOTSTRAP_BUILD`
 - `DOTCLAW_BOOTSTRAP_SELF_CHECK`
+- `DOTCLAW_CONFIGURE_CHAT_ID` (used when migrating registered groups between providers in non-interactive `configure`)
