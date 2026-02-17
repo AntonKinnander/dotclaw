@@ -2,6 +2,13 @@ import dotenv from 'dotenv';
 import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
+
+// IMPORTANT: Load .env before any other imports that read from process.env
+// This ensures DISCORD_CHANNELS and other env vars are available to config.ts
+const DOTCLAW_HOME = process.env.DOTCLAW_HOME || path.join(os.homedir(), '.dotclaw');
+const ENV_PATH = path.join(DOTCLAW_HOME, '.env');
+dotenv.config({ path: ENV_PATH, quiet: true } as Parameters<typeof dotenv.config>[0]);
 
 import {
   DATA_DIR,
@@ -10,11 +17,7 @@ import {
   CONTAINER_MODE,
   CONTAINER_PRIVILEGED,
   WARM_START_ENABLED,
-  ENV_PATH,
 } from './config.js';
-
-// Load .env from the canonical location (~/.dotclaw/.env)
-dotenv.config({ path: ENV_PATH, quiet: true } as Parameters<typeof dotenv.config>[0]);
 import { RegisteredGroup, Session, MessageAttachment } from './types.js';
 import {
   initDatabase,

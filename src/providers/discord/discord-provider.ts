@@ -20,7 +20,7 @@ import { ProviderRegistry } from '../registry.js';
 import { formatDiscordMessage } from './discord-format.js';
 import { generateId } from '../../id.js';
 import { logger } from '../../logger.js';
-import { GROUPS_DIR } from '../../config.js';
+import { GROUPS_DIR, getChannelConfig } from '../../config.js';
 import type { RuntimeConfig } from '../../runtime-config.js';
 
 const MAX_MESSAGE_LENGTH = 2000;
@@ -101,7 +101,6 @@ export class DiscordProvider implements MessagingProvider {
 
   private client: DiscordClient | null = null;
   private discordJs: DiscordModule | null = null;
-  private channelTypeDM: number | null = null;
   private readonly config: DiscordProviderConfig;
   private connected = false;
   private botId = '';
@@ -129,8 +128,7 @@ export class DiscordProvider implements MessagingProvider {
       );
     }
 
-    const { Client, GatewayIntentBits, Partials, ChannelType } = this.discordJs;
-    this.channelTypeDM = ChannelType?.DM ?? 1;
+    const { Client, GatewayIntentBits, Partials } = this.discordJs;
 
     this.client = new Client({
       intents: [
@@ -480,6 +478,37 @@ export class DiscordProvider implements MessagingProvider {
     return raw.referencedMessage.author.id === this.botId;
   }
 
+  /**
+   * Map Discord channel type number to descriptive string
+   */
+  private mapChannelTypeToString(channelType: number): string {
+    if (!this.discordJs) return 'unknown';
+
+    const { ChannelType } = this.discordJs;
+    if (channelType === ChannelType?.DM) return 'dm';
+    if (channelType === ChannelType?.GuildText) return 'guild_text';
+    if (channelType === ChannelType?.GuildForum) return 'guild_forum';
+    if (channelType === ChannelType?.GuildVoice) return 'guild_voice';
+    if (channelType === ChannelType?.GuildAnnouncement) return 'guild_announcement';
+    if (channelType === ChannelType?.PublicThread) return 'public_thread';
+    if (channelType === ChannelType?.PrivateThread) return 'private_thread';
+    if (channelType === ChannelType?.AnnouncementThread) return 'announcement_thread';
+    if (channelType === ChannelType?.GuildCategory) return 'guild_category';
+    if (channelType === ChannelType?.GuildMedia) return 'guild_media';
+    return 'unknown';
+  }
+
+  /**
+   * Check if a channel is a forum thread (thread inside a forum channel)
+   */
+  private isForumThread(message: DiscordMessage): boolean {
+    if (!this.discordJs || !message.channel?.isThread?.()) return false;
+
+    const { ChannelType } = this.discordJs;
+    const parent = message.channel.parent;
+    return parent?.type === ChannelType?.GuildForum;
+  }
+
   // -- Private helpers --
 
   private async fetchChannel(channelId: string): Promise<DiscordChannel | null> {
@@ -545,9 +574,21 @@ export class DiscordProvider implements MessagingProvider {
         if (message.author.bot) return;
 
         const content: string = message.content || '';
-        const channelId = String(message.channel.id);
-        const chatId = ProviderRegistry.addPrefix('discord', channelId);
+        const rawChannelId = String(message.channel.id);
+        const chatId = ProviderRegistry.addPrefix('discord', rawChannelId);
         const messageId = String(message.id);
+
+        // Get channel configuration
+        const channelConfig = getChannelConfig(rawChannelId);
+
+        // Forum channel filtering: skip initial forum posts, only process thread replies
+        const isForumThread = this.isForumThread(message);
+        if (channelConfig?.channelType === 'forum' && !isForumThread) {
+          // This is an initial forum post creation, not a reply in a thread
+          // Skip processing - the bot will respond when someone replies to the post
+          logger.debug({ channelId: rawChannelId }, 'Skipping initial forum post (not a thread reply)');
+          return;
+        }
 
         // Build attachment metadata
         const attachments: ProviderAttachment[] = [];
@@ -620,17 +661,24 @@ export class DiscordProvider implements MessagingProvider {
 
         if (!content && dedupedAttachments.length === 0) return;
 
-        const isDM = message.channel.type === this.channelTypeDM;
+        // Channel type detection
+        const channelType = message.channel.type;
+        const chatType = this.mapChannelTypeToString(channelType);
+        const isDM = chatType === 'dm';
         const isGroup = !isDM;
-        const chatType = isDM ? 'dm' : 'guild_text';
+
         const senderId = String(message.author.id);
         const senderName = message.member?.displayName || message.author.displayName || message.author.username || 'User';
         const timestamp = message.createdAt.toISOString();
         const threadId = message.channel.isThread?.() ? String(message.channel.id) : undefined;
+        const parentId = message.channel.parentId ? String(message.channel.parentId) : undefined;
 
         const chatName = isDM
           ? (message.author.displayName || message.author.username || senderName)
           : (message.guild?.name || senderName);
+
+        // Use channel name from config, or fall back to Discord channel name
+        const channelName = channelConfig?.channelName || message.channel.name;
 
         const storedContent = content || `[${dedupedAttachments.map(a => a.type).join(', ')}]`;
 
@@ -656,6 +704,14 @@ export class DiscordProvider implements MessagingProvider {
           chatType,
           threadId,
           attachments: dedupedAttachments.length > 0 ? dedupedAttachments : undefined,
+          // Channel context fields
+          channelName,
+          channelDescription: channelConfig?.description,
+          channelConfigType: channelConfig?.channelType,
+          defaultSkill: channelConfig?.defaultSkill,
+          channelType: chatType,
+          parentId,
+          isForumThread,
           rawProviderData: {
             referencedMessage,
             chatName,

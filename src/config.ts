@@ -14,6 +14,75 @@ import {
 
 const runtime = loadRuntimeConfig();
 
+// ── Discord Channel Configuration ────────────────────────────────────────
+
+export interface DiscordChannelConfig {
+  channelId: string;
+  channelName: string;
+  channelType: 'text' | 'voice' | 'forum';
+  description: string;
+  defaultSkill?: string;
+}
+
+let cachedChannelConfig: Map<string, DiscordChannelConfig> | null = null;
+
+export function getDiscordChannelConfig(): Map<string, DiscordChannelConfig> {
+  if (cachedChannelConfig) return cachedChannelConfig;
+
+  const envValue = process.env.DISCORD_CHANNELS || '';
+  const config = new Map<string, DiscordChannelConfig>();
+
+  // Support both formats:
+  // 1. Newline-separated entries (for multi-line .env with backslash continuations)
+  // 2. Double-pipe (||) separated entries on a single line (for dotenv single-line format)
+
+  // First, try splitting by newlines (handles shell script format)
+  let entries: string[];
+  if (envValue.includes('\n')) {
+    entries = envValue.split('\n');
+  } else {
+    // Single-line format: split by double-pipe delimiter ||
+    entries = envValue.split('||').filter(e => e.trim());
+  }
+
+  for (const entry of entries) {
+    const trimmed = entry.trim();
+    // Handle backslash line continuations
+    const cleanLine = trimmed.endsWith('\\') ? trimmed.slice(0, -1).trim() : trimmed;
+    if (!cleanLine) continue;
+
+    const parts = cleanLine.split('|');
+    if (parts.length < 3) continue;
+
+    const [channelId, channelName, channelType, description, defaultSkill] = parts;
+
+    if (channelId && channelName && channelType) {
+      const validTypes = ['text', 'voice', 'forum'];
+      const normalizedType = channelType.toLowerCase().trim();
+      if (!validTypes.includes(normalizedType)) continue;
+
+      config.set(channelId.trim(), {
+        channelId: channelId.trim(),
+        channelName: channelName.trim(),
+        channelType: normalizedType as 'text' | 'voice' | 'forum',
+        description: description?.trim() || '',
+        defaultSkill: defaultSkill?.trim() || undefined,
+      });
+    }
+  }
+
+  cachedChannelConfig = config;
+  return config;
+}
+
+export function getChannelConfig(channelId: string): DiscordChannelConfig | undefined {
+  return getDiscordChannelConfig().get(channelId);
+}
+
+export function invalidateChannelConfigCache(): void {
+  cachedChannelConfig = null;
+}
+
 // Re-export paths for convenience
 export {
   CONFIG_DIR,

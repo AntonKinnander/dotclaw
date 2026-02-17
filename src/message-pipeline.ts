@@ -201,6 +201,14 @@ export interface PipelineMessage {
   chatType: string;
   threadId?: string;
   attachments?: MessageAttachment[];
+  // Channel context fields
+  channelName?: string;
+  channelDescription?: string;
+  channelConfigType?: string;
+  channelType?: string;
+  defaultSkill?: string;
+  parentId?: string;
+  isForumThread?: boolean;
 }
 
 export interface MessagePipelineDeps {
@@ -275,6 +283,14 @@ export function createMessagePipeline(deps: MessagePipelineDeps) {
       is_group: msg.isGroup,
       chat_type: msg.chatType,
       message_thread_id: msg.threadId ? Number(msg.threadId) : undefined,
+      // Channel context
+      channel_name: msg.channelName || null,
+      channel_description: msg.channelDescription || null,
+      channel_config_type: msg.channelConfigType || null,
+      channel_type: msg.channelType || null,
+      default_skill: msg.defaultSkill || null,
+      parent_id: msg.parentId || null,
+      is_forum_thread: msg.isForumThread ?? null,
     });
     setMessageQueueDepth(getPendingMessageCount());
     if (!activeDrains.has(msg.chatId)) {
@@ -305,6 +321,14 @@ export function createMessagePipeline(deps: MessagePipelineDeps) {
           isGroup: last.is_group === 1,
           chatType: last.chat_type,
           threadId: last.message_thread_id != null ? String(last.message_thread_id) : undefined,
+          // Channel context from database
+          channelName: last.channel_name ?? undefined,
+          channelDescription: last.channel_description ?? undefined,
+          channelConfigType: last.channel_config_type ?? undefined,
+          channelType: last.channel_type ?? undefined,
+          defaultSkill: last.default_skill ?? undefined,
+          parentId: last.parent_id ?? undefined,
+          isForumThread: last.is_forum_thread === 1,
         };
         const batchIds = batch.map(b => b.id);
         try {
@@ -448,13 +472,49 @@ export function createMessagePipeline(deps: MessagePipelineDeps) {
       const inner = attachmentXml
         ? `${escapeXml(safeContent)}\n${attachmentXml}`
         : escapeXml(safeContent);
-      return `<message sender="${escapeXml(m.sender_name)}" sender_id="${escapeXml(m.sender)}" time="${m.timestamp}">${inner}</message>`;
+
+      // Build message XML with optional channel context
+      let messageAttrs = `sender="${escapeXml(m.sender_name)}" sender_id="${escapeXml(m.sender)}" time="${m.timestamp}"`;
+
+      // Add channel context for the current message (from PipelineMessage)
+      if (msg.channelName) {
+        messageAttrs += ` channel_name="${escapeXml(msg.channelName)}"`;
+      }
+      if (msg.channelDescription) {
+        messageAttrs += ` channel_description="${escapeXml(msg.channelDescription)}"`;
+      }
+      if (msg.channelConfigType) {
+        messageAttrs += ` channel_type="${escapeXml(msg.channelConfigType)}"`;
+      }
+
+      return `<message ${messageAttrs}>${inner}</message>`;
     });
 
     const { indices: promptLineIndices, omitted: omittedPromptMessages } =
       selectPromptLineIndicesWithinBudget(lines, runtime.queue.promptMaxChars);
     const selectedMessages = promptLineIndices.map(idx => missedMessages[idx]);
     const selectedLines = promptLineIndices.map(idx => lines[idx]);
+
+    // Prepend channel context message if we have channel information
+    if (msg.channelName || msg.channelDescription) {
+      const contextParts: string[] = [];
+      if (msg.channelName) {
+        contextParts.push(`You are in the "${msg.channelName}" channel`);
+      }
+      if (msg.channelDescription) {
+        contextParts.push(`which is for: ${msg.channelDescription}`);
+      }
+      if (msg.channelConfigType) {
+        contextParts.push(`(type: ${msg.channelConfigType} channel)`);
+      }
+      if (contextParts.length > 0) {
+        selectedLines.unshift(
+          `<message sender="system" sender_id="system" time="${msg.timestamp}">` +
+            `[${contextParts.join(' ')}]` +
+            `</message>`
+        );
+      }
+    }
 
     if (omittedPromptMessages > 0) {
       selectedLines.unshift(
@@ -585,6 +645,12 @@ export function createMessagePipeline(deps: MessagePipelineDeps) {
         attachments: containerAttachments,
         abortSignal: abortController.signal,
         streamDir,
+        // Channel context
+        channelName: msg.channelName,
+        channelDescription: msg.channelDescription,
+        channelConfigType: msg.channelConfigType,
+        defaultSkill: msg.defaultSkill,
+        isForumThread: msg.isForumThread,
       });
 
       // Concurrently watch stream chunks and deliver in real-time

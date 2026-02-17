@@ -118,4 +118,12 @@ export interface QueuedMessage {
   status: string;
   created_at: string;
   attempt_count?: number | null;
+  // Channel context fields
+  channel_name?: string | null;
+  channel_description?: string | null;
+  channel_config_type?: string | null;
+  channel_type?: string | null;
+  default_skill?: string | null;
+  parent_id?: string | null;
+  is_forum_thread?: number | null;
 }

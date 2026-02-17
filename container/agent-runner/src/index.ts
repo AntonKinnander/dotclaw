@@ -855,6 +855,24 @@ export async function runAgentOnce(input: ContainerInput): Promise<ContainerOutp
     : { effort: reasoningEffort as 'low' | 'medium' | 'high' };
 
   let prompt = input.prompt;
+
+  // Inject channel context for Discord channels
+  if (input.channelName) {
+    const channelParts: string[] = [`You are in the "${input.channelName}" channel`];
+    if (input.channelDescription) {
+      channelParts.push(`which is for: ${input.channelDescription}`);
+    }
+    if (input.channelConfigType) {
+      channelParts.push(`(type: ${input.channelConfigType} channel)`);
+    }
+    prompt = `[${channelParts.join(' ')}]\n\n${prompt}`;
+  }
+
+  // Note about default skill for the channel (future enhancement: auto-load skill)
+  if (input.defaultSkill) {
+    prompt = `[Default skill for this channel: ${input.defaultSkill}]\n\n${prompt}`;
+  }
+
   if (input.isScheduledTask) {
     prompt = `[SCHEDULED TASK - You are running automatically, not in response to a user message. Use mcp__dotclaw__send_message if needed to communicate with the user.]\n\n${input.prompt}`;
   }

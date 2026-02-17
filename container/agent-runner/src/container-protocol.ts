@@ -58,6 +58,12 @@ export interface ContainerInput {
     height?: number;
     transcript?: string;
   }>;
+  // Channel context (Discord-specific, optional for other platforms)
+  channelName?: string;
+  channelDescription?: string;
+  channelConfigType?: string;
+  defaultSkill?: string;
+  isForumThread?: boolean;
 }
 
 export interface ContainerOutput {

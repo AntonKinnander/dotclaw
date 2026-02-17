@@ -231,6 +231,9 @@ export function initDatabase(): void {
 
     // Chat JID prefix migration: add 'telegram:' prefix to all existing unprefixed IDs
     migrateChatJidPrefixes();
+
+    // Channel context migration: add columns for Discord channel context
+    migrateChannelContext();
   } catch (err) {
     dbInitialized = false;
     if (dbInstance) {
@@ -279,6 +282,48 @@ function migrateChatJidPrefixes(): void {
   } finally {
     db.pragma('foreign_keys = ON');
   }
+}
+
+function migrateChannelContext(): void {
+  // Create migration metadata table if needed
+  db.exec(`CREATE TABLE IF NOT EXISTS _migrations (key TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`);
+
+  const row = db.prepare(`SELECT key FROM _migrations WHERE key = 'channel_context_v1'`).get();
+  if (row) return; // Already migrated
+
+  // Add new columns to message_queue table for channel context
+  // Using ALTER TABLE with IF NOT EXISTS logic (SQLite 3.35.0+)
+  const columns = [
+    'channel_name TEXT',
+    'channel_description TEXT',
+    'channel_config_type TEXT',
+    'channel_type TEXT',
+    'default_skill TEXT',
+    'parent_id TEXT',
+    'is_forum_thread INTEGER DEFAULT 0'
+  ];
+
+  // Get existing columns
+  const existingColumns = db.prepare(`PRAGMA table_info(message_queue)`).all() as Array<{ name: string }>;
+  const existingColumnNames = new Set(existingColumns.map(c => c.name));
+
+  for (const column of columns) {
+    const columnName = column.split(' ')[0];
+    if (!existingColumnNames.has(columnName)) {
+      try {
+        db.exec(`ALTER TABLE message_queue ADD COLUMN ${column}`);
+      } catch (err) {
+        // Column might already exist or other error - log and continue
+        const errMsg = err instanceof Error ? err.message : String(err);
+        if (!errMsg.includes('duplicate column')) {
+          // Only log non-duplicate errors
+          console.warn(`Warning: Could not add column ${columnName}: ${errMsg}`);
+        }
+      }
+    }
+  }
+
+  db.prepare(`INSERT INTO _migrations (key, applied_at) VALUES (?, ?)`).run('channel_context_v1', new Date().toISOString());
 }
 
 /**
@@ -685,12 +730,21 @@ export function enqueueMessageItem(item: {
   is_group: boolean;
   chat_type: string;
   message_thread_id?: number;
+  // Channel context fields
+  channel_name?: string | null;
+  channel_description?: string | null;
+  channel_config_type?: string | null;
+  channel_type?: string | null;
+  default_skill?: string | null;
+  parent_id?: string | null;
+  is_forum_thread?: boolean | null;
 }): number {
   const now = new Date().toISOString();
-  const info = db.prepare(`
-    INSERT INTO message_queue (chat_jid, message_id, sender_id, sender_name, content, timestamp, is_group, chat_type, message_thread_id, status, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
-  `).run(
+
+  // Build dynamic SQL based on which optional fields are provided
+  const columns = ['chat_jid', 'message_id', 'sender_id', 'sender_name', 'content', 'timestamp', 'is_group', 'chat_type', 'message_thread_id', 'status', 'created_at'];
+  const placeholders = ['?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?'];
+  const values = [
     item.chat_jid,
     item.message_id,
     item.sender_id,
@@ -700,8 +754,49 @@ export function enqueueMessageItem(item: {
     item.is_group ? 1 : 0,
     item.chat_type,
     item.message_thread_id ?? null,
+    'pending',  // status
     now
-  );
+  ];
+
+  // Add optional channel context fields if provided
+  if (item.channel_name !== undefined) {
+    columns.push('channel_name');
+    placeholders.push('?');
+    values.push(item.channel_name);
+  }
+  if (item.channel_description !== undefined) {
+    columns.push('channel_description');
+    placeholders.push('?');
+    values.push(item.channel_description);
+  }
+  if (item.channel_config_type !== undefined) {
+    columns.push('channel_config_type');
+    placeholders.push('?');
+    values.push(item.channel_config_type);
+  }
+  if (item.channel_type !== undefined) {
+    columns.push('channel_type');
+    placeholders.push('?');
+    values.push(item.channel_type);
+  }
+  if (item.default_skill !== undefined) {
+    columns.push('default_skill');
+    placeholders.push('?');
+    values.push(item.default_skill);
+  }
+  if (item.parent_id !== undefined) {
+    columns.push('parent_id');
+    placeholders.push('?');
+    values.push(item.parent_id);
+  }
+  if (item.is_forum_thread !== undefined) {
+    columns.push('is_forum_thread');
+    placeholders.push('?');
+    values.push(item.is_forum_thread ? 1 : 0);
+  }
+
+  const sql = `INSERT INTO message_queue (${columns.join(', ')}) VALUES (${placeholders.join(', ')})`;
+  const info = db.prepare(sql).run(...values);
   return Number(info.lastInsertRowid);
 }
 

@@ -131,6 +131,12 @@ export async function executeAgentRun(params: {
     height?: number;
     transcript?: string;
   }>;
+  // Channel context
+  channelName?: string;
+  channelDescription?: string;
+  channelConfigType?: string;
+  defaultSkill?: string;
+  isForumThread?: boolean;
 }): Promise<{ output: ContainerOutput; context: AgentContext }> {
   const runStartedAt = Date.now();
   const group = params.group;
@@ -272,7 +278,13 @@ export async function executeAgentRun(params: {
     hostPlatform: `${process.platform}/${process.arch}`,
     maxToolSteps: activeMaxToolSteps,
     streamDir: params.streamDir,
-    attachments: params.attachments
+    attachments: params.attachments,
+    // Channel context
+    channelName: params.channelName,
+    channelDescription: params.channelDescription,
+    channelConfigType: params.channelConfigType,
+    defaultSkill: params.defaultSkill,
+    isForumThread: params.isForumThread,
   }, { abortSignal: params.abortSignal, timeoutMs: params.timeoutMs });
 
   void emitHook('agent:start', {

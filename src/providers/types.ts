@@ -8,10 +8,19 @@ export interface IncomingMessage {
   content: string;
   timestamp: string;
   isGroup: boolean;
-  chatType: string;            // 'private' | 'group' | 'supergroup' | 'guild_text' | 'dm'
+  chatType: string;            // 'private' | 'group' | 'supergroup' | 'guild_text' | 'dm' | 'guild_forum' | etc.
   threadId?: string;
   attachments?: ProviderAttachment[];
   rawProviderData?: unknown;
+
+  // Channel context fields (Discord-specific, optional for other providers)
+  channelName?: string;           // Display name: "general-chat", "ideas", etc.
+  channelDescription?: string;    // From .env config: "General chat for casual conversation"
+  channelConfigType?: string;     // Config type: 'text', 'voice', 'forum'
+  channelType?: string;           // Discord channel type: 'guild_forum', 'guild_text', 'guild_voice', etc.
+  defaultSkill?: string;          // Default skill for this channel from .env
+  parentId?: string;              // Parent channel ID (for threads)
+  isForumThread?: boolean;        // True if message is in a forum thread
 }
 
 export interface ProviderAttachment {
