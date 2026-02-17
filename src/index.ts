@@ -834,7 +834,15 @@ function createProviderHandlers(
           const replied = provider ? provider.isBotReplied(incoming) : false;
           const triggerRegex = isGroup && group?.trigger ? buildTriggerRegex(group.trigger) : null;
           const triggered = Boolean(triggerRegex && incoming.content && triggerRegex.test(incoming.content));
-          const shouldProcess = isPrivate || mentioned || replied || triggered;
+          // Owner bypass: bot responds to any message from the Discord owner
+          // Read directly from process.env since dotenv is loaded before this handler runs
+          const discordOwnerId = process.env.DISCORD_OWNER_ID || '';
+          const isOwner = discordOwnerId && incoming.senderId === discordOwnerId;
+          // Check if channel is excluded (bot won't respond even to owner in excluded channels)
+          const excludedChannels = (process.env.DISCORD_EXCLUDED_CHANNELS || '').split(',').map(id => id.trim()).filter(Boolean);
+          const rawChannelId = ProviderRegistry.stripPrefix(chatId);
+          const isExcludedChannel = excludedChannels.includes(rawChannelId);
+          const shouldProcess = !isExcludedChannel && (isPrivate || mentioned || replied || triggered || isOwner);
 
           if (!shouldProcess) return;
 
@@ -1312,7 +1320,8 @@ async function main(): Promise<void> {
     startDaemonHealthCheckLoop(() => registeredGroups, MAIN_GROUP_FOLDER);
     startWakeDetector((ms) => { void onWakeRecovery(ms); });
 
-    logger.info('DotClaw running (responds to DMs and group mentions/replies)');
+    const ownerConfigured = process.env.DISCORD_OWNER_ID ? '(owner mode enabled)' : '';
+    logger.info(`DotClaw running (responds to DMs, group mentions/replies ${ownerConfigured})`);
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     logger.error({ err: error instanceof Error ? error : new Error(msg) }, 'Failed to start DotClaw');

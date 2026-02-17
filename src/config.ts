@@ -51,6 +51,9 @@ export const CONTAINER_TMPFS_SIZE = runtime.host.container.tmpfsSize;
 export const CONTAINER_RUN_UID = runtime.host.container.runUid;
 export const CONTAINER_RUN_GID = runtime.host.container.runGid;
 
+// Discord owner ID (bot will respond to any message from this user)
+export const DISCORD_OWNER_ID = runtime.host.discord.ownerId || process.env.DISCORD_OWNER_ID || '';
+
 // Timezone for scheduled tasks (cron expressions, etc.)
 // Uses system timezone by default
 export const TIMEZONE = runtime.host.timezone;

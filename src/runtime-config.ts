@@ -142,6 +142,7 @@ export type RuntimeConfig = {
       enabled: boolean;
       sendRetries: number;
       sendRetryDelayMs: number;
+      ownerId: string;
     };
     progress: {
       enabled: boolean;
@@ -494,6 +495,7 @@ const DEFAULT_CONFIG: RuntimeConfig = {
       enabled: false,
       sendRetries: 3,
       sendRetryDelayMs: 1000,
+      ownerId: '',
     },
     progress: {
       enabled: true,

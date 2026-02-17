@@ -32,3 +32,4 @@ docs/.vitepress/cache/
 
 .claude/
 tmp/
+.env.example

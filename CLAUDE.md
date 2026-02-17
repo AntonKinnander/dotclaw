@@ -219,6 +219,26 @@ Key actions dispatched via `ipc-dispatcher.ts`: `set_model` (supports `action: '
 - **Linting**: ESLint flat config with typescript-eslint recommended. Zero warnings threshold.
 - **Node**: Requires Node.js >=20.
 
+## Important Patterns
+
+### Streaming Delivery
+Real-time streaming uses IPC-based file watching: container writes chunks to `~/.dotclaw/data/ipc/<group>/stream/<trace_id>/`, host watches via `watchStreamChunks()` and delivers via provider's edit-in-place. Enabled by `runtime.host.streaming.enabled`.
+
+### Turn Hygiene
+`turn-hygiene.ts` filters messages before agent processing: removes malformed messages, drops duplicates (same message_id), discards stale partials, and normalizes tool envelope formats. Applied in message pipeline before prompt construction.
+
+### Interrupt-on-New-Message
+When `runtime.host.messageQueue.interruptOnNewMessage` is true (default), new messages abort active agent runs via `AbortController`. User can type "cancel" or "stop" to manually abort.
+
+### Security: Group Folder Validation
+Always validate group folders with `isSafeGroupFolder(folder, GROUPS_DIR)` before filesystem operations. Prevents path traversal and ensures folder is within allowed groups directory.
+
+### Wake Recovery
+System detects sleep/wake via `wake-detector.ts`, suppresses daemon health checks for 60s, reconnects providers, resets stalled messages, and re-drains queues.
+
+### Hook System
+`hooks.ts` emits lifecycle events: `message:received`, `message:processing`, `message:responded`, `agent:started`, `agent:completed`, `agent:failed`, `memory:upserted`, `task:*`.
+
 ## Observability
 
 - **Prometheus metrics**: Port 3001 (`/metrics`) — messages, errors, tool calls, tokens, cost, latency histograms
