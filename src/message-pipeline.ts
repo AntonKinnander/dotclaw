@@ -382,8 +382,17 @@ export function createMessagePipeline(deps: MessagePipelineDeps) {
     const registeredGroups = deps.registeredGroups();
     const sessions = deps.sessions();
     const group = registeredGroups[msg.chatId];
+
+    // Debug: log all registered chat IDs
+    logger.info({
+      msgChatId: msg.chatId,
+      groupExists: !!group,
+      registeredChatIds: Object.keys(registeredGroups),
+      channelName: msg.channelName
+    }, 'processMessage: checking registration');
+
     if (!group) {
-      logger.debug({ chatId: msg.chatId }, 'Message from unregistered chat');
+      logger.warn({ chatId: msg.chatId }, 'Message from unregistered chat');
       return false;
     }
 

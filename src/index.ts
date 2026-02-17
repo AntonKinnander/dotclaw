@@ -152,7 +152,10 @@ const HEARTBEAT_GROUP_FOLDER = (runtime.host.heartbeat.groupFolder || MAIN_GROUP
 
 function loadState(): void {
   sessions = {};
-  const rawGroups = loadJson(path.join(DATA_DIR, 'registered_groups.json'), {}) as Record<string, RegisteredGroup>;
+  const groupsPath = path.join(DATA_DIR, 'registered_groups.json');
+  logger.info({ groupsPath }, 'Loading registered groups from file');
+  const rawGroups = loadJson(groupsPath, {}) as Record<string, RegisteredGroup>;
+  logger.info({ rawGroupCount: Object.keys(rawGroups).length, rawKeys: Object.keys(rawGroups) }, 'Raw groups loaded from file');
 
   // Migrate: prefix unprefixed chat IDs with 'telegram:'
   let migrated = false;
@@ -172,9 +175,7 @@ function loadState(): void {
   }
 
   const sanitizedGroups: Record<string, RegisteredGroup> = {};
-  const usedFolders = new Set<string>();
   let invalidCount = 0;
-  let duplicateCount = 0;
 
   for (const [chatId, group] of Object.entries(loadedGroups)) {
     if (!group || typeof group !== 'object') {
@@ -192,20 +193,21 @@ function loadState(): void {
       invalidCount += 1;
       continue;
     }
-    if (usedFolders.has(group.folder)) {
-      logger.warn({ chatId, folder: group.folder }, 'Skipping registered group with duplicate folder');
-      duplicateCount += 1;
-      continue;
-    }
-    usedFolders.add(group.folder);
+    // Note: We ALLOW multiple channels to share the same folder
+    // This enables all Discord channels to use the main workspace
     sanitizedGroups[chatId] = group;
   }
 
   registeredGroups = sanitizedGroups;
-  if (invalidCount > 0 || duplicateCount > 0) {
-    logger.error({ invalidCount, duplicateCount }, 'Registered groups contained invalid or duplicate folders');
+  if (invalidCount > 0) {
+    logger.error({ invalidCount }, 'Registered groups contained invalid entries');
   }
   logger.info({ groupCount: Object.keys(registeredGroups).length }, 'State loaded');
+  // Log all registered chat IDs for debugging
+  logger.info({
+    registeredChatIds: Object.keys(registeredGroups).sort(),
+    registeredDetails: Object.entries(registeredGroups).map(([id, g]) => ({ id, name: g.name, folder: g.folder }))
+  }, 'Registered groups details');
   const finalSessions = getAllGroupSessions();
   sessions = finalSessions.reduce<Session>((acc, row) => {
     acc[row.group_folder] = row.session_id;
@@ -218,11 +220,7 @@ function registerGroup(chatId: string, group: RegisteredGroup): void {
     logger.warn({ chatId, folder: group.folder }, 'Refusing to register group with invalid folder');
     return;
   }
-  const folderCollision = Object.values(registeredGroups).some(g => g.folder === group.folder);
-  if (folderCollision) {
-    logger.warn({ chatId, folder: group.folder }, 'Refusing to register group with duplicate folder');
-    return;
-  }
+  // Note: We ALLOW multiple channels to share the same folder
   registeredGroups[chatId] = group;
   saveJson(path.join(DATA_DIR, 'registered_groups.json'), registeredGroups);
 
@@ -846,6 +844,23 @@ function createProviderHandlers(
           const rawChannelId = ProviderRegistry.stripPrefix(chatId);
           const isExcludedChannel = excludedChannels.includes(rawChannelId);
           const shouldProcess = !isExcludedChannel && (isPrivate || mentioned || replied || triggered || isOwner);
+
+          // Debug logging for message processing
+          logger.debug({
+            chatId,
+            rawChannelId,
+            senderId: incoming.senderId,
+            discordOwnerId,
+            isOwner,
+            isPrivate,
+            mentioned,
+            replied,
+            triggered,
+            isExcludedChannel,
+            shouldProcess,
+            groupExists: !!group,
+            groupName: group?.name
+          }, 'Message processing check');
 
           if (!shouldProcess) return;
 
