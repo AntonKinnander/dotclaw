@@ -46,6 +46,33 @@ function normalizeCommand(tokens: string[]): ParsedCommand | null {
   if (first === 'memory') {
     return { command: 'memory', args: [secondRaw, ...rest].filter(Boolean) as string[] };
   }
+  if (first === 'briefing') {
+    return { command: 'briefing', args: [secondRaw, ...rest].filter(Boolean) as string[] };
+  }
+  if (first === 'recap') {
+    return { command: 'recap', args: [secondRaw, ...rest].filter(Boolean) as string[] };
+  }
+  if (first === 'journal') {
+    const sub = second || '';
+    if (sub === 'create' || sub === 'new') return { command: 'journal-create', args: rest };
+    if (sub === 'today' || sub === 'show') return { command: 'journal-today', args: rest };
+    if (sub === 'list' || sub === 'ls') return { command: 'journal-list', args: rest };
+    if (sub === 'update' || sub === 'edit') return { command: 'journal-update', args: rest };
+    return { command: 'journal-help', args: [] };
+  }
+  if (first === 'task') {
+    const sub = second || '';
+    if (sub === 'create' || sub === 'new' || sub === 'add') return { command: 'task-create', args: rest };
+    if (sub === 'list' || sub === 'ls') return { command: 'task-list', args: rest };
+    if (sub === 'status') return { command: 'task-status', args: rest };
+    if (sub === 'archive') return { command: 'task-archive', args: rest };
+    if (sub === 'lock') return { command: 'task-lock', args: rest };
+    if (sub === 'complete' || sub === 'done') return { command: 'task-complete', args: rest };
+    return { command: 'task-help', args: [] };
+  }
+  if (first === 'breakdown') {
+    return { command: 'breakdown', args: [secondRaw, ...rest].filter(Boolean) as string[] };
+  }
   if (first === 'skill') {
     const sub = second || '';
     if (sub === 'install') return { command: 'skill-install', args: rest };
