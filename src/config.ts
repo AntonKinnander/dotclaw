@@ -1,4 +1,6 @@
+import path from 'path';
 import { loadRuntimeConfig } from './runtime-config.js';
+import { loadJson } from './utils.js';
 import {
   CONFIG_DIR,
   DATA_DIR,
@@ -24,51 +26,77 @@ export interface DiscordChannelConfig {
   defaultSkill?: string;
 }
 
+interface DiscordChannelsConfig {
+  channels: DiscordChannelConfig[];
+}
+
 let cachedChannelConfig: Map<string, DiscordChannelConfig> | null = null;
 
 export function getDiscordChannelConfig(): Map<string, DiscordChannelConfig> {
   if (cachedChannelConfig) return cachedChannelConfig;
 
-  const envValue = process.env.DISCORD_CHANNELS || '';
   const config = new Map<string, DiscordChannelConfig>();
+  const configPath = path.join(CONFIG_DIR, 'discord-channels.json');
 
-  // Support both formats:
-  // 1. Newline-separated entries (for multi-line .env with backslash continuations)
-  // 2. Double-pipe (||) separated entries on a single line (for dotenv single-line format)
+  // Try loading from JSON config file first
+  const jsonConfig = loadJson<DiscordChannelsConfig>(configPath, { channels: [] });
 
-  // First, try splitting by newlines (handles shell script format)
-  let entries: string[];
-  if (envValue.includes('\n')) {
-    entries = envValue.split('\n');
+  // Fallback: parse from DISCORD_CHANNELS env var if JSON is empty
+  let useEnvFallback = jsonConfig.channels.length === 0;
+  const envValue = process.env.DISCORD_CHANNELS || '';
+
+  let entries: DiscordChannelConfig[] = [];
+
+  if (!useEnvFallback) {
+    entries = jsonConfig.channels;
   } else {
-    // Single-line format: split by double-pipe delimiter ||
-    entries = envValue.split('||').filter(e => e.trim());
+    // Parse from env var (legacy support)
+    let envEntries: string[];
+    if (envValue.includes('\n')) {
+      envEntries = envValue.split('\n');
+    } else {
+      envEntries = envValue.split('||').filter(e => e.trim());
+    }
+
+    for (const entry of envEntries) {
+      const trimmed = entry.trim();
+      const cleanLine = trimmed.endsWith('\\') ? trimmed.slice(0, -1).trim() : trimmed;
+      if (!cleanLine) continue;
+
+      const parts = cleanLine.split('|');
+      if (parts.length < 3) continue;
+
+      const [channelId, channelName, channelType, description, defaultSkill] = parts;
+
+      if (channelId && channelName && channelType) {
+        const validTypes = ['text', 'voice', 'forum'];
+        const normalizedType = channelType.toLowerCase().trim();
+        if (!validTypes.includes(normalizedType)) continue;
+
+        entries.push({
+          channelId: channelId.trim(),
+          channelName: channelName.trim(),
+          channelType: normalizedType as 'text' | 'voice' | 'forum',
+          description: description?.trim() || '',
+          defaultSkill: defaultSkill?.trim() || undefined,
+        });
+      }
+    }
   }
 
+  const validTypes = ['text', 'voice', 'forum'];
   for (const entry of entries) {
-    const trimmed = entry.trim();
-    // Handle backslash line continuations
-    const cleanLine = trimmed.endsWith('\\') ? trimmed.slice(0, -1).trim() : trimmed;
-    if (!cleanLine) continue;
+    if (!entry.channelId || !entry.channelName || !entry.channelType) continue;
+    const normalizedType = entry.channelType.toLowerCase().trim() as 'text' | 'voice' | 'forum';
+    if (!validTypes.includes(normalizedType)) continue;
 
-    const parts = cleanLine.split('|');
-    if (parts.length < 3) continue;
-
-    const [channelId, channelName, channelType, description, defaultSkill] = parts;
-
-    if (channelId && channelName && channelType) {
-      const validTypes = ['text', 'voice', 'forum'];
-      const normalizedType = channelType.toLowerCase().trim();
-      if (!validTypes.includes(normalizedType)) continue;
-
-      config.set(channelId.trim(), {
-        channelId: channelId.trim(),
-        channelName: channelName.trim(),
-        channelType: normalizedType as 'text' | 'voice' | 'forum',
-        description: description?.trim() || '',
-        defaultSkill: defaultSkill?.trim() || undefined,
-      });
-    }
+    config.set(entry.channelId.trim(), {
+      channelId: entry.channelId.trim(),
+      channelName: entry.channelName.trim(),
+      channelType: normalizedType,
+      description: entry.description?.trim() || '',
+      defaultSkill: entry.defaultSkill?.trim() || undefined,
+    });
   }
 
   cachedChannelConfig = config;

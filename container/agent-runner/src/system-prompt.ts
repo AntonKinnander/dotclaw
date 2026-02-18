@@ -22,6 +22,11 @@ export interface SystemPromptParams {
   hostPlatform?: string;
   timezone?: string;
 
+  // Channel context (Discord-specific, optional for other platforms)
+  channelName?: string;
+  channelDescription?: string;
+  channelType?: string;
+
   // Scheduled task context
   isScheduledTask: boolean;
   taskId?: string;
@@ -86,6 +91,19 @@ function buildIdentitySection(params: SystemPromptParams): string {
   if (params.messagingPlatform) {
     parts[0] += ` You are currently connected via ${params.messagingPlatform}.`;
   }
+
+  // Add channel context if available
+  if (params.channelName) {
+    const channelInfo = `You are in the "${params.channelName}" channel`;
+    const channelDetails = params.channelDescription
+      ? `${channelInfo}, which is for: ${params.channelDescription}`
+      : channelInfo;
+    const channelType = params.channelType
+      ? `${channelDetails} (type: ${params.channelType} channel)`
+      : channelDetails;
+    parts.push(channelType);
+  }
+
   return parts.join('\n');
 }
 

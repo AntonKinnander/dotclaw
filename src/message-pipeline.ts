@@ -482,19 +482,8 @@ export function createMessagePipeline(deps: MessagePipelineDeps) {
         ? `${escapeXml(safeContent)}\n${attachmentXml}`
         : escapeXml(safeContent);
 
-      // Build message XML with optional channel context
-      let messageAttrs = `sender="${escapeXml(m.sender_name)}" sender_id="${escapeXml(m.sender)}" time="${m.timestamp}"`;
-
-      // Add channel context for the current message (from PipelineMessage)
-      if (msg.channelName) {
-        messageAttrs += ` channel_name="${escapeXml(msg.channelName)}"`;
-      }
-      if (msg.channelDescription) {
-        messageAttrs += ` channel_description="${escapeXml(msg.channelDescription)}"`;
-      }
-      if (msg.channelConfigType) {
-        messageAttrs += ` channel_type="${escapeXml(msg.channelConfigType)}"`;
-      }
+      // Build message XML (channel context is now in system prompt via container)
+      const messageAttrs = `sender="${escapeXml(m.sender_name)}" sender_id="${escapeXml(m.sender)}" time="${m.timestamp}"`;
 
       return `<message ${messageAttrs}>${inner}</message>`;
     });
@@ -503,27 +492,6 @@ export function createMessagePipeline(deps: MessagePipelineDeps) {
       selectPromptLineIndicesWithinBudget(lines, runtime.queue.promptMaxChars);
     const selectedMessages = promptLineIndices.map(idx => missedMessages[idx]);
     const selectedLines = promptLineIndices.map(idx => lines[idx]);
-
-    // Prepend channel context message if we have channel information
-    if (msg.channelName || msg.channelDescription) {
-      const contextParts: string[] = [];
-      if (msg.channelName) {
-        contextParts.push(`You are in the "${msg.channelName}" channel`);
-      }
-      if (msg.channelDescription) {
-        contextParts.push(`which is for: ${msg.channelDescription}`);
-      }
-      if (msg.channelConfigType) {
-        contextParts.push(`(type: ${msg.channelConfigType} channel)`);
-      }
-      if (contextParts.length > 0) {
-        selectedLines.unshift(
-          `<message sender="system" sender_id="system" time="${msg.timestamp}">` +
-            `[${contextParts.join(' ')}]` +
-            `</message>`
-        );
-      }
-    }
 
     if (omittedPromptMessages > 0) {
       selectedLines.unshift(

@@ -436,6 +436,10 @@ function buildInstructions(params: {
   timezone?: string;
   hostPlatform?: string;
   messagingPlatform?: string;
+  // Channel context
+  channelName?: string;
+  channelDescription?: string;
+  channelType?: string;
   taskExtractionPack?: PromptPack | null;
   responseQualityPack?: PromptPack | null;
   toolCallingPack?: PromptPack | null;
@@ -451,6 +455,9 @@ function buildInstructions(params: {
     messagingPlatform: params.messagingPlatform,
     hostPlatform: params.hostPlatform,
     timezone: params.timezone,
+    channelName: params.channelName,
+    channelDescription: params.channelDescription,
+    channelType: params.channelType,
     isScheduledTask: params.isScheduledTask,
     taskId: params.taskId,
     groupNotes: params.groupNotes,
@@ -865,7 +872,11 @@ export async function runAgentOnce(input: ContainerInput): Promise<ContainerOutp
     if (input.channelConfigType) {
       channelParts.push(`(type: ${input.channelConfigType} channel)`);
     }
-    prompt = `[${channelParts.join(' ')}]\n\n${prompt}`;
+    const channelContext = `[${channelParts.join(' ')}]`;
+    log(`Channel context injected: ${channelContext}`);
+    prompt = `${channelContext}\n\n${prompt}`;
+  } else {
+    log(`No channel context: channelName=${input.channelName}, channelDescription=${input.channelDescription}, channelConfigType=${input.channelConfigType}`);
   }
 
   // Note about default skill for the channel (future enhancement: auto-load skill)
@@ -1114,6 +1125,10 @@ export async function runAgentOnce(input: ContainerInput): Promise<ContainerOutp
       timezone: typeof input.timezone === 'string' ? input.timezone : undefined,
       hostPlatform: typeof input.hostPlatform === 'string' ? input.hostPlatform : undefined,
       messagingPlatform: input.chatJid?.includes(':') ? input.chatJid.split(':')[0] : undefined,
+      // Channel context from input
+      channelName: input.channelName,
+      channelDescription: input.channelDescription,
+      channelType: input.channelConfigType,
       taskExtractionPack: taskPackResult?.pack || null,
       responseQualityPack: responseQualityResult?.pack || null,
       toolCallingPack: toolCallingResult?.pack || null,

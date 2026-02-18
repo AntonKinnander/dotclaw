@@ -7,8 +7,6 @@ import type {
   IncomingMessage,
   ProviderAttachment,
   SendResult,
-  SendOptions,
-  BaseOptions,
   MediaOptions,
   VoiceOptions,
   AudioOptions,
@@ -170,13 +168,13 @@ export class DiscordProvider implements MessagingProvider {
     }
   }
 
-  async sendMessage(chatId: string, text: string, opts?: SendOptions): Promise<SendResult> {
+  async sendMessage(chatId: string, text: string): Promise<SendResult> {
     const rawChannelId = ProviderRegistry.stripPrefix(chatId);
     const chunks = formatDiscordMessage(text, MAX_MESSAGE_LENGTH);
     let firstMessageId: string | undefined;
 
     for (let i = 0; i < chunks.length; i += 1) {
-      const result = await this.sendChunk(rawChannelId, chunks[i], opts?.replyToMessageId);
+      const result = await this.sendChunk(rawChannelId, chunks[i], undefined);
       if (!result.success) return { success: false };
       if (!firstMessageId && result.messageId) {
         firstMessageId = result.messageId;
@@ -222,16 +220,16 @@ export class DiscordProvider implements MessagingProvider {
   }
 
   async sendPhoto(chatId: string, filePath: string, opts?: MediaOptions): Promise<SendResult> {
-    return this.sendFileAttachment(chatId, filePath, opts?.caption, opts);
+    return this.sendFileAttachment(chatId, filePath, opts?.caption);
   }
 
   async sendDocument(chatId: string, filePath: string, opts?: MediaOptions): Promise<SendResult> {
-    return this.sendFileAttachment(chatId, filePath, opts?.caption, opts);
+    return this.sendFileAttachment(chatId, filePath, opts?.caption);
   }
 
   async sendVoice(chatId: string, filePath: string, opts?: VoiceOptions): Promise<SendResult> {
     // Discord has no native voice messages; send as file attachment
-    return this.sendFileAttachment(chatId, filePath, opts?.caption, opts);
+    return this.sendFileAttachment(chatId, filePath, opts?.caption);
   }
 
   async sendAudio(chatId: string, filePath: string, opts?: AudioOptions): Promise<SendResult> {
@@ -239,18 +237,18 @@ export class DiscordProvider implements MessagingProvider {
     const caption = opts?.title
       ? `${opts.title}${opts.performer ? ` - ${opts.performer}` : ''}`
       : opts?.caption;
-    return this.sendFileAttachment(chatId, filePath, caption, opts);
+    return this.sendFileAttachment(chatId, filePath, caption);
   }
 
-  async sendLocation(chatId: string, lat: number, lng: number, opts?: BaseOptions): Promise<SendResult> {
+  async sendLocation(chatId: string, lat: number, lng: number): Promise<SendResult> {
     const text = `\u{1F4CD} Location: https://maps.google.com/?q=${lat},${lng}`;
-    return this.sendMessage(chatId, text, opts);
+    return this.sendMessage(chatId, text);
   }
 
   async sendContact(chatId: string, phone: string, name: string, opts?: ContactOptions): Promise<SendResult> {
     const fullName = opts?.lastName ? `${name} ${opts.lastName}` : name;
     const text = `\u{1F4C7} Contact: ${fullName}\n\u{1F4DE} ${phone}`;
-    return this.sendMessage(chatId, text, opts);
+    return this.sendMessage(chatId, text);
   }
 
   async sendPoll(chatId: string, question: string, options: string[], opts?: PollOptions): Promise<SendResult> {
@@ -272,9 +270,6 @@ export class DiscordProvider implements MessagingProvider {
             layoutType: this.discordJs.PollLayoutType.Default,
           },
         };
-        if (opts?.replyToMessageId) {
-          pollData.reply = { messageReference: opts.replyToMessageId, failIfNotExists: false };
-        }
         const sent: DiscordMessage = await channel.send(pollData);
         logger.info({ chatId: rawChannelId, question }, 'Discord poll sent');
         return { success: true, messageId: String(sent.id) };
@@ -291,7 +286,7 @@ export class DiscordProvider implements MessagingProvider {
     }
   }
 
-  async sendButtons(chatId: string, text: string, buttons: ButtonRow[], opts?: BaseOptions): Promise<SendResult> {
+  async sendButtons(chatId: string, text: string, buttons: ButtonRow[]): Promise<SendResult> {
     const rawChannelId = ProviderRegistry.stripPrefix(chatId);
     if (!this.discordJs) return { success: false };
 
@@ -318,9 +313,6 @@ export class DiscordProvider implements MessagingProvider {
       }
 
       const payload: Record<string, unknown> = { content: text, components };
-      if (opts?.replyToMessageId) {
-        payload.reply = { messageReference: opts.replyToMessageId, failIfNotExists: false };
-      }
       const sent: DiscordMessage = await channel.send(payload);
       logger.info({ chatId: rawChannelId }, 'Discord buttons sent');
       return { success: true, messageId: String(sent.id) };
@@ -524,8 +516,7 @@ export class DiscordProvider implements MessagingProvider {
   private async sendFileAttachment(
     chatId: string,
     filePath: string,
-    caption?: string,
-    opts?: BaseOptions
+    caption?: string
   ): Promise<SendResult> {
     const rawChannelId = ProviderRegistry.stripPrefix(chatId);
     for (let attempt = 1; attempt <= this.config.sendRetries; attempt += 1) {
@@ -537,9 +528,6 @@ export class DiscordProvider implements MessagingProvider {
         };
         if (caption) {
           payload.content = caption;
-        }
-        if (opts?.replyToMessageId) {
-          payload.reply = { messageReference: opts.replyToMessageId, failIfNotExists: false };
         }
         const sent: DiscordMessage = await channel.send(payload);
         logger.info({ chatId: rawChannelId, filePath }, 'Discord file sent');
@@ -692,6 +680,16 @@ export class DiscordProvider implements MessagingProvider {
             referencedMessage = { author: { id: String(cachedRef.author.id) } };
           }
         }
+
+        // Debug: Log channel config
+        logger.debug({
+          channelId: rawChannelId,
+          channelConfigFound: !!channelConfig,
+          channelName: channelConfig?.channelName,
+          channelDescription: channelConfig?.description,
+          channelType: channelConfig?.channelType,
+          defaultSkill: channelConfig?.defaultSkill
+        }, 'Discord channel config retrieved');
 
         const incoming: IncomingMessage = {
           chatId,
