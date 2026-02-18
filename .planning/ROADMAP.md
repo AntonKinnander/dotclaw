@@ -1,51 +1,99 @@
 # Roadmap: Daily Planning & Briefing Workflow
 
-## Milestone 1.0 - Core Foundation (Phases 01-04)
+## Milestone 1.0 - Core Foundation
 
-Focus: Basic database, journal system, and daily briefing/scheduling
+| Plan | Focus | Status |
+|-------|--------|--------|
+| 01-01 | Database Schema & Core Types | `[[complete]]` |
+| 01-02 | Channel Architecture | `[[complete]]` |
+| 01-03 | Message Storage | `[[complete]]` |
+| 01-04 | Event Processing | `[[complete]]` |
 
-| Phase | Description | Status |
-|-------|-------------|--------|
-| 01 - Database & Core Types | Journal, task, and briefing tables + TypeScript types | `[[pending]]` |
-| 02 - Journal System | Nightly journal creation, storage, retrieval, memory integration | `[[pending]]` |
-| 03 - Daily Briefing Skill | Agent skill for morning briefings using journal + memory | `[[pending]]` |
-| 04 - Nightly Recap Flow | Conversational recap data gathering + journal generation | `[[pending]]` |
+## Milestone 1.1 - TO-DO System
 
-## Milestone 1.1 - TO-DO System (Phases 05-08)
+| Plan | Focus | Status |
+|-------|--------|--------|
+| 02-01 | Task Breakdown Subagent | `[[complete]]` |
+| 02-02 | Forum Task Creation | `[[complete]]` |
+| 02-03 | Poll Tracking | `[[pending]]` |
+| 02-04 | Task Completion | `[[pending]]` |
 
-Focus: Forum-based task threads with Discord polls
+## Milestone 1.2 - Scheduling & Automation
 
-| Phase | Description | Status |
-|-------|-------------|--------|
-| 05 - Task Breakdown | Subagent for atomic task decomposition (max 10) | `[[pending]]` |
-| 06 - Forum Thread Manager | Create/update/archive forum threads for tasks | `[[pending]]` |
-| 07 - Poll-Based Checklists | Create Discord polls, track completion, handle reactions | `[[pending]]` |
-| 08 - Daily Planning Flow | Collaborative planning with accountability dialogue | `[[pending]]` |
+| Plan | Focus | Status |
+|-------|--------|--------|
+| 03-01 | Scheduled Triggers | `[[pending]]` |
+| 03-02 | State Manager | `[[pending]]` |
+| 03-03 | Integration & Polish | `[[pending]]` |
 
-## Milestone 1.2 - Scheduling & Automation (Phases 09-11)
+---
 
-Focus: Automated briefings, recap triggers, state persistence
+## Completed Work
 
-| Phase | Description | Status |
-|-------|-------------|--------|
-| 09 - Scheduled Triggers | Cron tasks for briefing generation and nightly recap | `[[pending]]` |
-| 10 - State Manager | Track poll state, task progress, thread lifecycle | `[[pending]]` |
-| 11 - Integration & Polish | End-to-end workflows, error handling, user controls | `[[pending]]` |
+### 01-01: Database Schema & Core Types ✅
+- Created `daily_journals`, `daily_tasks`, `daily_briefings` tables
+- Added TypeScript types for all entities
+- Implemented CRUD functions for journals, tasks, and briefings
+- Migration tracking in place
 
-## Milestone 2.0 - Future Enhancements (Backlog)
+### 01-02: Channel Architecture ✅
+- Forum channel detection (type 15)
+- Text channel handling (type 0)
+- Channel metadata extraction
 
-| Feature | Description | Status |
-|---------|-------------|--------|
-| Calendar Integration | Pull events from Google Calendar/CalDAV | `[[backlog]]` |
-| Goal Tracking | Long-term goal progress, milestone tracking | `[[backlog]]` |
-| Analytics | Week/month reviews, productivity metrics | `[[backlog]]` |
-| Multi-user Support | Shared planning for teams/families | `[[backlog]]` |
+### 01-03: Message Storage ✅
+- Discord message storage to database
+- Attachment handling
+- Thread message linking
+
+### 01-04: Event Processing ✅
+- Discord event handlers
+- Message queue integration
+- Channel context preservation
+
+### 02-01: Task Breakdown Subagent ✅
+- Task breakdown skill (`global/skills/task-breakdown/SKILL.md`)
+- Orchestrator module (`src/task-breakdown.ts`)
+- IPC action `breakdown_task`
+- Validates emoji prefix, max 55 chars, max 10 subtasks
+
+### 02-02: Forum Task Creation ✅
+- Forum thread manager (`src/forum-thread-manager.ts`)
+- Thread state persistence to JSON file
+- Auto-archive after 24 hours
+- Create, archive, lock operations
+
+## Remaining Work
+
+### 02-03: Poll Tracking
+- Discord poll creation
+- Poll answer tracking
+- Vote count updates
+
+### 02-04: Task Completion
+- Poll completion detection
+- Reaction override (✅)
+- Auto-archive completed tasks
+
+### 03-01: Scheduled Triggers
+- Briefing scheduler module
+- Recap trigger module
+- Admin commands for scheduling
+
+### 03-02: State Manager
+- Unified state tracking
+- Discord API polling
+- Background sync loop
+
+### 03-03: Integration & Polish
+- End-to-end workflow tests
+- Error handling and recovery
+- User control commands
 
 ---
 
 ## Notes
 
-- Each phase is independently executable and verifiable
+- Each plan is independently executable and verifiable
+- `[[complete]]` marks fully implemented phases
 - `[[pending]]` marks planned/unfinished work
-- Use `[[complete]]` when phase is done
-- Phases are atomic - aim for 2-3 tasks per phase maximum
