@@ -234,6 +234,9 @@ export function initDatabase(): void {
 
     // Channel context migration: add columns for Discord channel context
     migrateChannelContext();
+
+    // Daily planning system migration: add tables for journals, tasks, and briefings
+    migrateDailyPlanning();
   } catch (err) {
     dbInitialized = false;
     if (dbInstance) {
@@ -324,6 +327,76 @@ function migrateChannelContext(): void {
   }
 
   db.prepare(`INSERT INTO _migrations (key, applied_at) VALUES (?, ?)`).run('channel_context_v1', new Date().toISOString());
+}
+
+function migrateDailyPlanning(): void {
+  // Create migration metadata table if needed
+  db.exec(`CREATE TABLE IF NOT EXISTS _migrations (key TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`);
+
+  const row = db.prepare(`SELECT key FROM _migrations WHERE key = 'daily_planning_v1'`).get();
+  if (row) return; // Already migrated
+
+  // Create daily planning tables
+  db.exec(`
+    -- Daily journal entries
+    CREATE TABLE IF NOT EXISTS daily_journals (
+      id TEXT PRIMARY KEY,
+      group_folder TEXT NOT NULL,
+      date TEXT NOT NULL,
+      tasks_completed TEXT,
+      tasks_in_progress TEXT,
+      sentiment TEXT,
+      biggest_success TEXT,
+      biggest_error TEXT,
+      highlights TEXT,
+      focus_tomorrow TEXT,
+      diary_entry TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(group_folder, date)
+    );
+    CREATE INDEX IF NOT EXISTS idx_journals_date ON daily_journals(date DESC);
+
+    -- Atomic daily tasks
+    CREATE TABLE IF NOT EXISTS daily_tasks (
+      id TEXT PRIMARY KEY,
+      group_folder TEXT NOT NULL,
+      journal_id TEXT,
+      parent_task TEXT,
+      title TEXT NOT NULL,
+      description TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      priority INTEGER DEFAULT 0,
+      tags TEXT,
+      metadata TEXT,
+      discord_channel_id TEXT,
+      discord_thread_id TEXT,
+      discord_poll_id TEXT,
+      poll_data TEXT,
+      completed_at TEXT,
+      created_at TEXT NOT NULL,
+      due_date TEXT,
+      archived_at TEXT,
+      FOREIGN KEY (journal_id) REFERENCES daily_journals(id) ON DELETE SET NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_tasks_status ON daily_tasks(status);
+    CREATE INDEX IF NOT EXISTS idx_tasks_date ON daily_tasks(created_at DESC);
+
+    -- Generated daily briefings
+    CREATE TABLE IF NOT EXISTS daily_briefings (
+      id TEXT PRIMARY KEY,
+      group_folder TEXT NOT NULL,
+      date TEXT NOT NULL,
+      briefing_text TEXT NOT NULL,
+      sources TEXT,
+      delivered_at TEXT,
+      created_at TEXT NOT NULL,
+      UNIQUE(group_folder, date)
+    );
+    CREATE INDEX IF NOT EXISTS idx_briefings_date ON daily_briefings(date DESC);
+  `);
+
+  db.prepare(`INSERT INTO _migrations (key, applied_at) VALUES (?, ?)`).run('daily_planning_v1', new Date().toISOString());
 }
 
 /**
@@ -930,4 +1003,431 @@ export function getPendingMessageCount(): number {
     const row = db.prepare("SELECT COUNT(*) as count FROM message_queue WHERE status = 'pending'").get() as { count: number };
     return row.count;
   } catch { return 0; }
+}
+
+// ── Daily Planning & Briefing CRUD Functions ─────────────────────────────
+
+// Re-import types for internal use
+interface DailyJournalRow {
+  id: string;
+  group_folder: string;
+  date: string;
+  tasks_completed: string | null;
+  tasks_in_progress: string | null;
+  sentiment: string | null;
+  biggest_success: string | null;
+  biggest_error: string | null;
+  highlights: string | null;
+  focus_tomorrow: string | null;
+  diary_entry: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface DailyTaskRow {
+  id: string;
+  group_folder: string;
+  journal_id: string | null;
+  parent_task: string | null;
+  title: string;
+  description: string | null;
+  status: string;
+  priority: number;
+  tags: string | null;
+  metadata: string | null;
+  discord_channel_id: string | null;
+  discord_thread_id: string | null;
+  discord_poll_id: string | null;
+  poll_data: string | null;
+  completed_at: string | null;
+  created_at: string;
+  due_date: string | null;
+  archived_at: string | null;
+}
+
+interface DailyBriefingRow {
+  id: string;
+  group_folder: string;
+  date: string;
+  briefing_text: string;
+  sources: string | null;
+  delivered_at: string | null;
+  created_at: string;
+}
+
+/**
+ * Create a new journal entry
+ */
+export function createDailyJournal(input: {
+  group_folder: string;
+  date?: string;
+  tasks_completed?: string[];
+  tasks_in_progress?: string[];
+  sentiment?: 'positive' | 'neutral' | 'negative';
+  biggest_success?: string;
+  biggest_error?: string;
+  highlights?: { good: string[]; bad: string[] } | null;
+  focus_tomorrow?: string;
+  diary_entry?: string;
+}): string {
+  const id = generateId('journal');
+  const date = input.date || new Date().toISOString().split('T')[0];
+  const now = new Date().toISOString();
+
+  db.prepare(`
+    INSERT INTO daily_journals (
+      id, group_folder, date, tasks_completed, tasks_in_progress,
+      sentiment, biggest_success, biggest_error, highlights,
+      focus_tomorrow, diary_entry, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(group_folder, date) DO UPDATE SET
+      tasks_completed = excluded.tasks_completed,
+      tasks_in_progress = excluded.tasks_in_progress,
+      sentiment = excluded.sentiment,
+      biggest_success = excluded.biggest_success,
+      biggest_error = excluded.biggest_error,
+      highlights = excluded.highlights,
+      focus_tomorrow = excluded.focus_tomorrow,
+      diary_entry = excluded.diary_entry,
+      updated_at = excluded.updated_at
+  `).run(
+    id,
+    input.group_folder,
+    date,
+    input.tasks_completed ? JSON.stringify(input.tasks_completed) : null,
+    input.tasks_in_progress ? JSON.stringify(input.tasks_in_progress) : null,
+    input.sentiment || null,
+    input.biggest_success || null,
+    input.biggest_error || null,
+    input.highlights ? JSON.stringify(input.highlights) : null,
+    input.focus_tomorrow || null,
+    input.diary_entry || null,
+    now,
+    now
+  );
+
+  return id;
+}
+
+/**
+ * Get journal by group and date
+ */
+export function getDailyJournalByDate(groupFolder: string, date: string): DailyJournalRow | undefined {
+  return db.prepare('SELECT * FROM daily_journals WHERE group_folder = ? AND date = ?')
+    .get(groupFolder, date) as DailyJournalRow | undefined;
+}
+
+/**
+ * Get latest journal for a group
+ */
+export function getLatestDailyJournal(groupFolder: string): DailyJournalRow | undefined {
+  return db.prepare('SELECT * FROM daily_journals WHERE group_folder = ? ORDER BY date DESC LIMIT 1')
+    .get(groupFolder) as DailyJournalRow | undefined;
+}
+
+/**
+ * List journals for a group
+ */
+export function listDailyJournals(groupFolder: string, limit = 30): DailyJournalRow[] {
+  return db.prepare('SELECT * FROM daily_journals WHERE group_folder = ? ORDER BY date DESC LIMIT ?')
+    .all(groupFolder, limit) as DailyJournalRow[];
+}
+
+/**
+ * Update a journal entry
+ */
+export function updateDailyJournal(id: string, updates: Partial<{
+  tasks_completed: string[];
+  tasks_in_progress: string[];
+  sentiment: 'positive' | 'neutral' | 'negative';
+  biggest_success: string;
+  biggest_error: string;
+  highlights: { good: string[]; bad: string[] };
+  focus_tomorrow: string;
+  diary_entry: string;
+}>): void {
+  const fields: string[] = [];
+  const values: unknown[] = [];
+
+  if (updates.tasks_completed !== undefined) {
+    fields.push('tasks_completed = ?');
+    values.push(JSON.stringify(updates.tasks_completed));
+  }
+  if (updates.tasks_in_progress !== undefined) {
+    fields.push('tasks_in_progress = ?');
+    values.push(JSON.stringify(updates.tasks_in_progress));
+  }
+  if (updates.sentiment !== undefined) {
+    fields.push('sentiment = ?');
+    values.push(updates.sentiment);
+  }
+  if (updates.biggest_success !== undefined) {
+    fields.push('biggest_success = ?');
+    values.push(updates.biggest_success);
+  }
+  if (updates.biggest_error !== undefined) {
+    fields.push('biggest_error = ?');
+    values.push(updates.biggest_error);
+  }
+  if (updates.highlights !== undefined) {
+    fields.push('highlights = ?');
+    values.push(JSON.stringify(updates.highlights));
+  }
+  if (updates.focus_tomorrow !== undefined) {
+    fields.push('focus_tomorrow = ?');
+    values.push(updates.focus_tomorrow);
+  }
+  if (updates.diary_entry !== undefined) {
+    fields.push('diary_entry = ?');
+    values.push(updates.diary_entry);
+  }
+
+  if (fields.length === 0) return;
+
+  fields.push('updated_at = ?');
+  values.push(new Date().toISOString());
+  values.push(id);
+
+  db.prepare(`UPDATE daily_journals SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+}
+
+// ── Daily Task CRUD ───────────────────────────────────────────────────────
+
+/**
+ * Create a new daily task
+ */
+export function createDailyTask(input: {
+  group_folder: string;
+  journal_id?: string;
+  parent_task?: string;
+  title: string;
+  description?: string;
+  priority?: number;
+  tags?: string[];
+  metadata?: Record<string, unknown> | null;
+  due_date?: string;
+}): string {
+  const id = generateId('task');
+  const now = new Date().toISOString();
+
+  db.prepare(`
+    INSERT INTO daily_tasks (
+      id, group_folder, journal_id, parent_task, title, description,
+      status, priority, tags, metadata, created_at, due_date
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    id,
+    input.group_folder,
+    input.journal_id || null,
+    input.parent_task || null,
+    input.title,
+    input.description || null,
+    'pending',
+    input.priority ?? 0,
+    input.tags ? JSON.stringify(input.tags) : null,
+    input.metadata ? JSON.stringify(input.metadata) : null,
+    now,
+    input.due_date || null
+  );
+
+  return id;
+}
+
+/**
+ * Get task by ID
+ */
+export function getDailyTaskById(id: string): DailyTaskRow | undefined {
+  return db.prepare('SELECT * FROM daily_tasks WHERE id = ?')
+    .get(id) as DailyTaskRow | undefined;
+}
+
+/**
+ * Get tasks for a journal
+ */
+export function getDailyTasksByJournal(journalId: string): DailyTaskRow[] {
+  return db.prepare('SELECT * FROM daily_tasks WHERE journal_id = ? ORDER BY priority DESC, created_at ASC')
+    .all(journalId) as DailyTaskRow[];
+}
+
+/**
+ * Get tasks for a specific date (via journal lookup)
+ */
+export function getDailyTasksForDate(groupFolder: string, date: string): DailyTaskRow[] {
+  return db.prepare(`
+    SELECT t.* FROM daily_tasks t
+    INNER JOIN daily_journals j ON t.journal_id = j.id
+    WHERE j.group_folder = ? AND j.date = ?
+    ORDER BY t.priority DESC, t.created_at ASC
+  `).all(groupFolder, date) as DailyTaskRow[];
+}
+
+/**
+ * Get all active (non-archived) tasks for a group
+ */
+export function getActiveDailyTasks(groupFolder: string): DailyTaskRow[] {
+  return db.prepare(`
+    SELECT * FROM daily_tasks
+    WHERE group_folder = ? AND status != 'archived'
+    ORDER BY priority DESC, created_at ASC
+  `).all(groupFolder) as DailyTaskRow[];
+}
+
+/**
+ * Update a task
+ */
+export function updateDailyTask(id: string, updates: Partial<{
+  status: 'pending' | 'in_progress' | 'completed' | 'archived';
+  title: string;
+  description: string;
+  priority: number;
+  tags: string[];
+  metadata: Record<string, unknown>;
+  completed_at: string;
+  archived_at: string;
+}>): void {
+  const fields: string[] = [];
+  const values: unknown[] = [];
+
+  if (updates.status !== undefined) {
+    fields.push('status = ?');
+    values.push(updates.status);
+    // Auto-set completed_at if status is completed
+    if (updates.status === 'completed' && !updates.completed_at) {
+      fields.push('completed_at = ?');
+      values.push(new Date().toISOString());
+    }
+  }
+  if (updates.title !== undefined) {
+    fields.push('title = ?');
+    values.push(updates.title);
+  }
+  if (updates.description !== undefined) {
+    fields.push('description = ?');
+    values.push(updates.description);
+  }
+  if (updates.priority !== undefined) {
+    fields.push('priority = ?');
+    values.push(updates.priority);
+  }
+  if (updates.tags !== undefined) {
+    fields.push('tags = ?');
+    values.push(JSON.stringify(updates.tags));
+  }
+  if (updates.metadata !== undefined) {
+    fields.push('metadata = ?');
+    values.push(JSON.stringify(updates.metadata));
+  }
+  if (updates.completed_at !== undefined) {
+    fields.push('completed_at = ?');
+    values.push(updates.completed_at);
+  }
+  if (updates.archived_at !== undefined) {
+    fields.push('archived_at = ?');
+    values.push(updates.archived_at);
+  }
+
+  if (fields.length === 0) return;
+
+  values.push(id);
+  db.prepare(`UPDATE daily_tasks SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+}
+
+/**
+ * Set Discord references for a task
+ */
+export function setDailyTaskDiscordRefs(
+  id: string,
+  channelId: string | null,
+  threadId: string | null,
+  pollId: string | null
+): void {
+  db.prepare(`
+    UPDATE daily_tasks
+    SET discord_channel_id = ?, discord_thread_id = ?, discord_poll_id = ?
+    WHERE id = ?
+  `).run(channelId, threadId, pollId, id);
+}
+
+/**
+ * Update poll data for a task
+ */
+export function updateDailyTaskPollData(
+  id: string,
+  pollData: {
+    question: string;
+    answers: Array<{ id: number; text: string; emoji?: string; checked: boolean }>;
+  } | null
+): void {
+  db.prepare('UPDATE daily_tasks SET poll_data = ? WHERE id = ?')
+    .run(pollData ? JSON.stringify(pollData) : null, id);
+}
+
+/**
+ * Archive old tasks for a group
+ */
+export function archiveOldDailyTasks(groupFolder: string, olderThanDays = 30): number {
+  const cutoff = new Date(Date.now() - olderThanDays * 24 * 60 * 60 * 1000).toISOString();
+  const info = db.prepare(`
+    UPDATE daily_tasks
+    SET archived_at = ?, status = 'archived'
+    WHERE group_folder = ? AND created_at < ? AND status != 'archived'
+  `).run(new Date().toISOString(), groupFolder, cutoff);
+  return info.changes;
+}
+
+// ── Daily Briefing CRUD ───────────────────────────────────────────────────
+
+/**
+ * Create a daily briefing
+ */
+export function createDailyBriefing(input: {
+  group_folder: string;
+  date?: string;
+  briefing_text: string;
+  sources?: { journal_id?: string; tasks?: string[]; events?: Array<{title: string; time: string}> } | null;
+}): string {
+  const id = generateId('briefing');
+  const date = input.date || new Date().toISOString().split('T')[0];
+  const now = new Date().toISOString();
+
+  db.prepare(`
+    INSERT INTO daily_briefings (id, group_folder, date, briefing_text, sources, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(group_folder, date) DO UPDATE SET
+      briefing_text = excluded.briefing_text,
+      sources = excluded.sources
+  `).run(
+    id,
+    input.group_folder,
+    date,
+    input.briefing_text,
+    input.sources ? JSON.stringify(input.sources) : null,
+    now
+  );
+
+  return id;
+}
+
+/**
+ * Get briefing by group and date
+ */
+export function getDailyBriefingByDate(groupFolder: string, date: string): DailyBriefingRow | undefined {
+  return db.prepare('SELECT * FROM daily_briefings WHERE group_folder = ? AND date = ?')
+    .get(groupFolder, date) as DailyBriefingRow | undefined;
+}
+
+/**
+ * Get latest briefing for a group
+ */
+export function getLatestDailyBriefing(groupFolder: string): DailyBriefingRow | undefined {
+  return db.prepare('SELECT * FROM daily_briefings WHERE group_folder = ? ORDER BY date DESC LIMIT 1')
+    .get(groupFolder) as DailyBriefingRow | undefined;
+}
+
+/**
+ * Mark briefing as delivered
+ */
+export function markBriefingDelivered(id: string): void {
+  db.prepare('UPDATE daily_briefings SET delivered_at = ? WHERE id = ?')
+    .run(new Date().toISOString(), id);
 }

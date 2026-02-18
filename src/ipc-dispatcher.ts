@@ -8,6 +8,7 @@ import {
   deleteTask,
   getTaskById,
 } from './db.js';
+import { parseSubtasks, extractEmoji } from './task-breakdown.js';
 import { resolveContainerGroupPathToHost } from './path-mapping.js';
 import {
   upsertMemoryItems,
@@ -1178,6 +1179,43 @@ async function processRequestIpc(
             tokens_completion: run.tokens_completion,
           }
         };
+      }
+      case 'breakdown_task': {
+        const mainTask = typeof payload.main_task === 'string' ? payload.main_task.trim() : '';
+        if (!mainTask) {
+          return { id: requestId, ok: false, error: 'main_task is required' };
+        }
+
+        try {
+          const result = await breakdownTask({
+            group_folder: sourceGroup,
+            main_task: mainTask,
+            context: payload.context as { repo?: string; url?: string; calendar_link?: string; description?: string } | undefined,
+          }, {
+            registeredGroups: deps.registeredGroups,
+            getProvider: () => deps.getProvider(),
+          });
+
+          // Validate subtask count
+          if (result.subtasks.length > 10) {
+            return { id: requestId, ok: false, error: 'Too many subtasks generated (max 10)' };
+          }
+
+          // Validate each subtask format
+          for (const subtask of result.subtasks) {
+            if (subtask.title.length > 55) {
+              return { id: requestId, ok: false, error: `Subtask title too long: ${subtask.title}` };
+            }
+            if (!/^[\p{Emoji}]/u.test(subtask.title)) {
+              return { id: requestId, ok: false, error: `Subtask missing emoji prefix: ${subtask.title}` };
+            }
+          }
+
+          return { id: requestId, ok: true, result };
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          return { id: requestId, ok: false, error: errMsg };
+        }
       }
       default:
         return { id: requestId, ok: false, error: `Unknown request type: ${data.type}` };

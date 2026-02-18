@@ -259,9 +259,19 @@ Skills are markdown files discovered at runtime from `/workspace/group/skills/` 
 
 When working with Discord-related features in this codebase:
 
-1. **Documentation Resources**: Use Google's NotebookLM or official Discord.js documentation when uncertain about Discord API specifics. Discord.js v14+ documentation at https://discord.js.org and Discord API docs at https://discord.com/developers/docs/intro are authoritative sources.
+1. **NotebookLM Integration**: The `.claude/skills/notebooklm/` skill provides access to a Discord.js Expert Guide notebook with modern v14.25.1 documentation. This is the default notebook and contains:
+   - Discord.js v14.25.1 API patterns and methods
+   - Events, threads, polls, reactions, buttons, modals
+   - TypeScript implementation examples
+   - Best practices for Discord bot development
 
-2. **Consult Before Sensitive Decisions**: When making decisions that could:
+   Use the NotebookLM skill whenever you need Discord.js-specific guidance.
+
+2. **Official Documentation**: When NotebookLM isn't available, refer to:
+   - Discord.js docs: https://discord.js.org
+   - Discord API docs: https://discord.com/developers/docs/intro
+
+3. **Consult Before Sensitive Decisions**: When making decisions that could:
    - Break existing Discord integrations
    - Change channel/thread/poll management
    - Modify permission requirements
@@ -269,7 +279,7 @@ When working with Discord-related features in this codebase:
 
    Always ask for confirmation first or explain the approach and wait for user approval.
 
-3. **Key Discord Patterns in This Codebase**:
+4. **Key Discord Patterns in This Codebase**:
    - Forum threads for task organization (planned in daily planning workflow)
    - Native polls for checklists (multi-select, max 10 options)
    - Reactions for completion tracking (✅ override)

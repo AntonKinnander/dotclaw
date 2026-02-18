@@ -136,3 +136,122 @@ export interface QueuedMessage {
   parent_id?: string | null;
   is_forum_thread?: number | null;
 }
+
+// ── Daily Planning & Briefing Types ──────────────────────────────────────
+
+/**
+ * Daily journal entry for end-of-day recap
+ */
+export interface DailyJournal {
+  id: string;
+  group_folder: string;
+  date: string;  // YYYY-MM-DD
+  tasks_completed: string[];
+  tasks_in_progress: string[];
+  sentiment: 'positive' | 'neutral' | 'negative';
+  biggest_success: string | null;
+  biggest_error: string | null;
+  highlights: {
+    good: string[];
+    bad: string[];
+  } | null;
+  focus_tomorrow: string | null;
+  diary_entry: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * Input for creating or updating a journal
+ */
+export interface JournalInput {
+  group_folder: string;
+  date?: string;  // defaults to today
+  tasks_completed?: string[];
+  tasks_in_progress?: string[];
+  sentiment?: DailyJournal['sentiment'];
+  biggest_success?: string;
+  biggest_error?: string;
+  highlights?: DailyJournal['highlights'];
+  focus_tomorrow?: string;
+  diary_entry?: string;
+}
+
+/**
+ * Atomic daily task with Discord integration
+ */
+export interface DailyTask {
+  id: string;
+  group_folder: string;
+  journal_id: string | null;
+  parent_task: string | null;
+  title: string;
+  description: string | null;
+  status: 'pending' | 'in_progress' | 'completed' | 'archived';
+  priority: number;
+  tags: string[] | null;
+  metadata: {
+    repo?: string;
+    url?: string;
+    calendar_link?: string;
+    [key: string]: unknown;
+  } | null;
+  discord_channel_id: string | null;
+  discord_thread_id: string | null;
+  discord_poll_id: string | null;
+  poll_data: {
+    question: string;
+    answers: Array<{
+      id: number;
+      text: string;
+      emoji?: string;
+      checked: boolean;
+    }>;
+  } | null;
+  completed_at: string | null;
+  created_at: string;
+  due_date: string | null;  // YYYY-MM-DD
+  archived_at: string | null;
+}
+
+/**
+ * Input for creating or updating a task
+ */
+export interface TaskInput {
+  group_folder: string;
+  journal_id?: string;
+  parent_task?: string;
+  title: string;
+  description?: string;
+  priority?: number;
+  tags?: string[];
+  metadata?: DailyTask['metadata'];
+  due_date?: string;
+}
+
+/**
+ * Generated daily briefing
+ */
+export interface DailyBriefing {
+  id: string;
+  group_folder: string;
+  date: string;
+  briefing_text: string;
+  sources: {
+    journal_id?: string;
+    tasks?: string[];
+    events?: Array<{title: string; time: string}>;
+  } | null;
+  delivered_at: string | null;
+  created_at: string;
+}
+
+/**
+ * Input for creating a briefing
+ */
+export interface BriefingInput {
+  group_folder: string;
+  date?: string;  // defaults to today
+  briefing_text: string;
+  sources?: DailyBriefing['sources'];
+}
