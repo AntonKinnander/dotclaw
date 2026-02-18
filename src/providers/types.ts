@@ -117,10 +117,22 @@ export interface MessagingProvider {
   setTyping(chatId: string): Promise<void>;
   isBotMentioned(message: IncomingMessage): boolean;
   isBotReplied(message: IncomingMessage): boolean;
+  getBotId?(): string; // Discord-specific: get the bot's user ID
+}
+
+export interface SlashCommandInteraction {
+  chatId: string;
+  senderId: string;
+  senderName: string;
+  commandName: string;
+  options: Map<string, string | number | boolean>;
+  channelId: string;
+  threadId?: string;
 }
 
 export interface ProviderEventHandlers {
   onMessage(message: IncomingMessage): void;
   onReaction(chatId: string, messageId: string, userId: string | undefined, emoji: string): void;
   onButtonClick(chatId: string, senderId: string, senderName: string, label: string, data: string, threadId?: string): void;
+  onSlashCommand?(interaction: SlashCommandInteraction): void;
 }

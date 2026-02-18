@@ -117,6 +117,38 @@ function normalizeCommand(tokens: string[]): ParsedCommand | null {
   return null;
 }
 
+/**
+ * Direct command aliases - commands that work without /dotclaw prefix
+ */
+const DIRECT_COMMANDS = new Set([
+  'help',
+  'groups',
+  'briefing',
+  'recap',
+  'journal',
+  'journal-create',
+  'journal-today',
+  'journal-list',
+  'journal-update',
+  'task',
+  'task-create',
+  'task-list',
+  'task-status',
+  'task-complete',
+  'task-archive',
+  'task-lock',
+  'breakdown',
+  'daily-plan',
+  'schedule-recap',
+  'show-schedule',
+  'planning-status',
+  'configure-workflow',
+  'complete-task',
+  'archive-task',
+  'show-journal',
+  'sync-commands', // Special command that should never reach AI
+]);
+
 export function parseAdminCommand(content: string, botUsername?: string): ParsedCommand | null {
   const text = content.trim();
   if (!text) return null;
@@ -127,12 +159,23 @@ export function parseAdminCommand(content: string, botUsername?: string): Parsed
     const rawCommand = tokens[0];
     const command = rawCommand.split('@')[0].toLowerCase();
     const rest = tokens.slice(1);
+
+    // /dotclaw or /dc prefix - normalize the rest
     if (command === 'dotclaw' || command === 'dc') {
       return normalizeCommand(rest) || { command: 'help', args: [] };
     }
-    if (command === 'help' || command === 'groups') {
+
+    // Direct commands (work without /dotclaw prefix)
+    if (DIRECT_COMMANDS.has(command)) {
+      // For commands with hyphens, they already match our normalized format
+      // For simple commands like 'journal' or 'task', we need to normalize
+      const normalized = normalizeCommand([command, ...rest]);
+      if (normalized) return normalized;
+
+      // Fallback: return as-is if no normalization matched
       return { command, args: rest };
     }
+
     return null;
   }
 

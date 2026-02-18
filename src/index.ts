@@ -70,6 +70,7 @@ import type { IncomingMessage, MessagingProvider } from './providers/types.js';
 import { createMessagePipeline, getActiveDrains, getActiveRuns, providerAttachmentToMessageAttachment } from './message-pipeline.js';
 import { startIpcWatcher, stopIpcWatcher } from './ipc-dispatcher.js';
 import { startWebhookServer, stopWebhookServer } from './webhook.js';
+import { registerSlashCommands } from './providers/discord/discord-commands.js';
 
 const runtime = loadRuntimeConfig();
 
@@ -77,6 +78,7 @@ const runtime = loadRuntimeConfig();
 
 let sessions: Session = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
+let discordBotId: string | null = null;  // Store Discord bot ID for command sync
 
 // ───────────────────────── Helpers ─────────────────────────
 
@@ -362,6 +364,7 @@ async function handleAdminCommand(params: {
       '**General:**',
       '- `/dotclaw help` — show this help',
       '- `/dotclaw groups` — list registered groups (main only)',
+      '- `/sync-commands` — sync Discord slash commands (instant for guild commands)',
       '',
       '**Daily Planning:**',
       '- `/briefing` — generate daily briefing',
@@ -398,6 +401,58 @@ async function handleAdminCommand(params: {
   if (command === 'groups') {
     if (requireMain('Listing groups')) return true;
     await reply(formatGroups(listRegisteredGroups()));
+    return true;
+  }
+
+  if (command === 'sync-commands') {
+    // Special command that should never reach the AI - sync Discord slash commands
+    if (!discordBotId) {
+      await reply('Discord bot not connected. Cannot sync commands.');
+      return true;
+    }
+
+    // Check if this is a Discord chat
+    if (!params.chatId.startsWith('discord:')) {
+      await reply('This command only works in Discord.');
+      return true;
+    }
+
+    // Get the guild ID from the chat ID (for Discord channels)
+    // For guild-specific commands, we'd need the guild ID from the channel
+    // For now, we'll register globally (takes up to 1 hour) or use a configured guild
+    const envGuildId = process.env.DISCORD_GUILD_ID;
+    if (!envGuildId) {
+      await reply(
+        'Warning: No DISCORD_GUILD_ID set. Commands will be registered globally (may take up to 1 hour to propagate).\n' +
+        'Set DISCORD_GUILD_ID in .env for instant guild-specific command sync.\n' +
+        'Syncing global commands...'
+      );
+    }
+
+    const token = process.env.DISCORD_BOT_TOKEN;
+    if (!token) {
+      await reply('Error: DISCORD_BOT_TOKEN not set.');
+      return true;
+    }
+
+    await reply('Syncing Discord slash commands...');
+
+    const result = await registerSlashCommands({
+      token,
+      clientId: discordBotId,
+      guildId: envGuildId, // Optional: if set, guild commands (instant); otherwise global (1hr)
+    });
+
+    if (result.success) {
+      const scope = result.guildCommands ? 'guild' : 'global';
+      const timing = result.guildCommands ? 'instant' : 'up to 1 hour';
+      await reply(`✅ Successfully registered ${result.count} commands (${scope}, ${timing})`);
+      logger.info({ count: result.count, scope }, 'Discord slash commands synced via /sync-commands');
+    } else {
+      await reply(`❌ Failed to sync commands: ${result.error || 'Unknown error'}`);
+      logger.error({ error: result.error }, 'Failed to sync Discord slash commands via /sync-commands');
+    }
+
     return true;
   }
 
@@ -1723,6 +1778,27 @@ async function main(): Promise<void> {
 
     if (discordProvider) {
       await discordProvider.start(handlers);
+      // Capture bot ID for command sync
+      if (discordProvider.getBotId) {
+        discordBotId = discordProvider.getBotId();
+        logger.info({ botId: discordBotId }, 'Discord bot ID captured for command sync');
+
+        // Auto-sync commands on startup if DISCORD_GUILD_ID is set (guild commands = instant)
+        const guildId = process.env.DISCORD_GUILD_ID;
+        if (guildId) {
+          logger.info('Auto-syncing Discord slash commands on startup...');
+          const syncResult = await registerSlashCommands({
+            token: process.env.DISCORD_BOT_TOKEN!,
+            clientId: discordBotId,
+            guildId,
+          });
+          if (syncResult.success) {
+            logger.info({ count: syncResult.count }, 'Discord slash commands synced on startup');
+          } else {
+            logger.warn({ error: syncResult.error }, 'Failed to sync Discord slash commands on startup');
+          }
+        }
+      }
       logger.info('Discord bot started');
     }
 

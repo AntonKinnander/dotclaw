@@ -117,6 +117,10 @@ export class DiscordProvider implements MessagingProvider {
     return this.connected;
   }
 
+  getBotId(): string {
+    return this.botId;
+  }
+
   /**
    * Get channel configuration from registered groups.
    * Reads Discord metadata from the unified registered_groups.json.
@@ -939,6 +943,92 @@ export class DiscordProvider implements MessagingProvider {
     // Handle button interactions
     this.client.on('interactionCreate', async (interaction: DiscordMessage) => {
       try {
+        // Handle slash commands
+        if (interaction.isChatSubjectCommand?.() || interaction.commandName) {
+          const commandName = String(interaction.commandName || '');
+
+          // Acknowledge the interaction
+          try {
+            await interaction.deferReply();
+          } catch (ackErr) {
+            logger.debug({ err: ackErr, commandName }, 'Failed to acknowledge slash command');
+          }
+
+          const channelId = String(interaction.channel?.id || '');
+          const chatId = ProviderRegistry.addPrefix('discord', channelId);
+
+          const senderId = String(interaction.user?.id || '');
+          const senderName = interaction.member?.displayName
+            || interaction.user?.displayName
+            || interaction.user?.username
+            || 'User';
+
+          const threadId = interaction.channel?.isThread?.() ? String(interaction.channel.id) : undefined;
+
+          // Extract options
+          const options = new Map<string, string | number | boolean>();
+          if (interaction.options) {
+            // Convert the collection to a Map
+            const optsCollection = interaction.options;
+            if (optsCollection.forEach) {
+              optsCollection.forEach((opt: { name: string; value: string | number | boolean }) => {
+                options.set(opt.name, opt.value);
+              });
+            }
+          }
+
+          // Convert slash command to text format for existing command parser
+          // This way slash commands work with the existing command infrastructure
+          const textParts = [`/${commandName}`];
+          for (const [, value] of options) {
+            // Add option values, wrapping strings in quotes if they contain spaces
+            if (typeof value === 'string' && value.includes(' ')) {
+              textParts.push(`"${value}"`);
+            } else {
+              textParts.push(String(value));
+            }
+          }
+          const textCommand = textParts.join(' ');
+
+          // Send a fake message to the message handler
+          const fakeMessage: IncomingMessage = {
+            chatId,
+            messageId: `slash_${Date.now()}_${interaction.id}`,
+            senderId,
+            senderName,
+            content: textCommand,
+            timestamp: new Date().toISOString(),
+            isGroup: interaction.guildId !== null,
+            chatType: interaction.guildId ? 'guild_text' : 'dm',
+            threadId,
+            rawProviderData: {
+              isSlashCommand: true,
+              interactionId: interaction.id,
+              originalCommand: commandName,
+              options,
+            },
+          };
+
+          handlers.onMessage(fakeMessage);
+
+          // Also call the slash command handler if it exists
+          if (handlers.onSlashCommand) {
+            handlers.onSlashCommand({
+              chatId,
+              senderId,
+              senderName,
+              commandName,
+              options,
+              channelId,
+              threadId,
+            });
+          }
+
+          logger.debug({ commandName, chatId, senderId }, 'Slash command processed');
+          return;
+        }
+
+        // Handle button interactions
         if (!interaction.isButton?.()) return;
         const customId: string = interaction.customId;
         const entry = this.callbackDataStore.get(customId);
