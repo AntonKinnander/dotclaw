@@ -14,11 +14,12 @@ import type {
   PollOptions,
   ButtonRow,
 } from '../types.js';
+import type { RegisteredGroup } from '../../types.js';
 import { ProviderRegistry } from '../registry.js';
 import { formatDiscordMessage } from './discord-format.js';
 import { generateId } from '../../id.js';
 import { logger } from '../../logger.js';
-import { GROUPS_DIR, getChannelConfig } from '../../config.js';
+import { GROUPS_DIR } from '../../config.js';
 import type { RuntimeConfig } from '../../runtime-config.js';
 
 const MAX_MESSAGE_LENGTH = 2000;
@@ -71,6 +72,7 @@ export interface DiscordProviderConfig {
   sendRetries: number;
   sendRetryDelayMs: number;
   groupsDir: string;
+  registeredGroups: () => Record<string, RegisteredGroup>;
 }
 
 // discord.js types (loaded dynamically)
@@ -113,6 +115,31 @@ export class DiscordProvider implements MessagingProvider {
 
   isConnected(): boolean {
     return this.connected;
+  }
+
+  /**
+   * Get channel configuration from registered groups.
+   * Reads Discord metadata from the unified registered_groups.json.
+   */
+  private getChannelConfig(channelId: string): {
+    channelId: string;
+    channelName: string;
+    channelType: string;
+    description?: string;
+    defaultSkill?: string;
+  } | undefined {
+    const chatId = ProviderRegistry.addPrefix('discord', channelId);
+    const group = this.config.registeredGroups()[chatId];
+    if (group?.discord) {
+      return {
+        channelId: group.discord.channelId,
+        channelName: group.discord.channelName,
+        channelType: group.discord.channelType,
+        description: group.discord.description || '',
+        defaultSkill: group.discord.defaultSkill,
+      };
+    }
+    return undefined;
   }
 
   async start(handlers: ProviderEventHandlers): Promise<void> {
@@ -567,7 +594,7 @@ export class DiscordProvider implements MessagingProvider {
         const messageId = String(message.id);
 
         // Get channel configuration
-        const channelConfig = getChannelConfig(rawChannelId);
+        const channelConfig = this.getChannelConfig(rawChannelId);
 
         // Forum channel filtering: skip initial forum posts, only process thread replies
         const isForumThread = this.isForumThread(message);
@@ -780,7 +807,10 @@ export class DiscordProvider implements MessagingProvider {
   }
 }
 
-export function createDiscordProvider(runtime: RuntimeConfig): DiscordProvider {
+export function createDiscordProvider(
+  runtime: RuntimeConfig,
+  registeredGroups: () => Record<string, RegisteredGroup>
+): DiscordProvider {
   const token = process.env.DISCORD_BOT_TOKEN;
   if (!token) {
     throw new Error('DISCORD_BOT_TOKEN environment variable is required');
@@ -790,5 +820,6 @@ export function createDiscordProvider(runtime: RuntimeConfig): DiscordProvider {
     sendRetries: runtime.host.discord.sendRetries,
     sendRetryDelayMs: runtime.host.discord.sendRetryDelayMs,
     groupsDir: GROUPS_DIR,
+    registeredGroups,
   });
 }

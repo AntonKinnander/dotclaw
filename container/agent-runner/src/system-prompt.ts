@@ -26,6 +26,7 @@ export interface SystemPromptParams {
   channelName?: string;
   channelDescription?: string;
   channelType?: string;
+  defaultSkill?: string;
 
   // Scheduled task context
   isScheduledTask: boolean;
@@ -101,7 +102,10 @@ function buildIdentitySection(params: SystemPromptParams): string {
     const channelType = params.channelType
       ? `${channelDetails} (type: ${params.channelType} channel)`
       : channelDetails;
-    parts.push(channelType);
+    const defaultSkill = params.defaultSkill
+      ? `${channelType}. Default skill: ${params.defaultSkill}`
+      : channelType;
+    parts.push(defaultSkill);
   }
 
   return parts.join('\n');

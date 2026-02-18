@@ -669,13 +669,28 @@ async function processTaskIpc(
         break;
       }
       if (data.jid && data.name && data.folder) {
-        deps.registerGroup(data.jid as string, {
+        const group: RegisteredGroup = {
           name: data.name as string,
           folder: data.folder as string,
           trigger: data.trigger as string | undefined,
           added_at: new Date().toISOString(),
           containerConfig: data.containerConfig as RegisteredGroup['containerConfig'],
-        });
+        };
+
+        // Add Discord metadata if provided
+        if (data.discordChannelId && data.discordChannelName) {
+          group.discord = {
+            channelId: data.discordChannelId as string,
+            channelName: data.discordChannelName as string,
+            channelType: (data.discordChannelType === 'text' || data.discordChannelType === 'voice' || data.discordChannelType === 'forum')
+              ? data.discordChannelType as 'text' | 'voice' | 'forum'
+              : 'text',
+            description: data.discordDescription as string | undefined,
+            defaultSkill: data.discordDefaultSkill as string | undefined,
+          };
+        }
+
+        deps.registerGroup(data.jid as string, group);
       } else {
         logger.warn({ data }, 'Invalid register_group request - missing required fields');
       }

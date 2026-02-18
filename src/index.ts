@@ -386,27 +386,77 @@ async function handleAdminCommand(params: {
   if (command === 'add-group') {
     if (requireMain('Adding groups')) return true;
     if (args.length < 2) {
-      await reply('Usage: /dotclaw add-group <chat_id> <name> [folder]');
+      await reply('Usage: /dotclaw add-group <chat_id> <name> [folder] [--type <text|voice|forum>] [--desc <description>] [--skill <skillname>]');
       return true;
     }
     const newChatId = args[0];
     const name = args[1];
-    const folder = args[2] || name.toLowerCase().replace(/[^a-z0-9_-]/g, '-').slice(0, 50);
-    if (!isSafeGroupFolder(folder, GROUPS_DIR)) {
-      await reply(`Invalid folder name: "${folder}"`);
+
+    // Parse optional flags
+    const flags = {
+      type: undefined as string | undefined,
+      desc: undefined as string | undefined,
+      skill: undefined as string | undefined,
+    };
+
+    // Find positional folder arg (first arg that doesn't start with --)
+    let folder: string | undefined = args[2];
+    const remainingArgs = args.slice(3);
+    let i = 0;
+    while (i < remainingArgs.length) {
+      const arg = remainingArgs[i];
+      if (arg === '--type' && i + 1 < remainingArgs.length) {
+        flags.type = remainingArgs[i + 1];
+        i += 2;
+      } else if (arg === '--desc' && i + 1 < remainingArgs.length) {
+        flags.desc = remainingArgs[i + 1];
+        i += 2;
+      } else if (arg === '--skill' && i + 1 < remainingArgs.length) {
+        flags.skill = remainingArgs[i + 1];
+        i += 2;
+      } else {
+        i++;
+      }
+    }
+
+    // If folder starts with --, it's actually a flag, use default folder
+    if (folder && folder.startsWith('--')) {
+      folder = undefined;
+    }
+
+    const resolvedFolder = folder || name.toLowerCase().replace(/[^a-z0-9_-]/g, '-').slice(0, 50);
+    if (!isSafeGroupFolder(resolvedFolder, GROUPS_DIR)) {
+      await reply(`Invalid folder name: "${resolvedFolder}"`);
       return true;
     }
     if (registeredGroups[newChatId]) {
       await reply(`Chat ${newChatId} is already registered.`);
       return true;
     }
+
     const newGroup: RegisteredGroup = {
       name,
-      folder,
+      folder: resolvedFolder,
       added_at: new Date().toISOString()
     };
+
+    // Add Discord metadata if provider is Discord and flags provided
+    if (newChatId.startsWith('discord:') && (flags.type || flags.desc || flags.skill)) {
+      const rawChannelId = ProviderRegistry.stripPrefix(newChatId);
+      newGroup.discord = {
+        channelId: rawChannelId,
+        channelName: name,
+        channelType: (flags.type === 'text' || flags.type === 'voice' || flags.type === 'forum') ? flags.type : 'text',
+        description: flags.desc,
+        defaultSkill: flags.skill,
+      };
+    }
+
     registerGroup(newChatId, newGroup);
-    await reply(`Group "${name}" registered (folder: ${folder}).`);
+    const metadataInfo = newGroup.discord
+      ? ` (Discord: ${newGroup.discord.channelType}${newGroup.discord.defaultSkill ? `, skill: ${newGroup.discord.defaultSkill}` : ''})`
+      : '';
+    await reply(`Group "${name}" registered (folder: ${resolvedFolder})${metadataInfo}.`);
     return true;
   }
 
@@ -1170,7 +1220,7 @@ async function main(): Promise<void> {
   let discordProvider: MessagingProvider | null = null;
   if (runtime.host.discord.enabled && process.env.DISCORD_BOT_TOKEN) {
     const { createDiscordProvider } = await import('./providers/discord/index.js');
-    discordProvider = createDiscordProvider(runtime);
+    discordProvider = createDiscordProvider(runtime, () => registeredGroups);
     providerRegistry.register(discordProvider);
     logger.info('Discord provider registered');
   } else if (runtime.host.discord.enabled && !process.env.DISCORD_BOT_TOKEN) {

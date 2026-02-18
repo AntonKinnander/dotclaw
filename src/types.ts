@@ -33,12 +33,21 @@ export interface ContainerConfig {
   env?: Record<string, string>;
 }
 
+export interface DiscordChannelMetadata {
+  channelId: string;
+  channelName: string;
+  channelType: 'text' | 'voice' | 'forum';
+  description?: string;
+  defaultSkill?: string;
+}
+
 export interface RegisteredGroup {
   name: string;
   folder: string;
   trigger?: string;
   added_at: string;
   containerConfig?: ContainerConfig;
+  discord?: DiscordChannelMetadata;
 }
 
 export interface Session {
