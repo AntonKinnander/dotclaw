@@ -1288,7 +1288,7 @@ Example format: ["🔍 Reproduce bug", "🐛 Find root cause", "💻 Write fix"]
 
         try {
           // Import daily planning functions
-          const { createDailyTask, setDailyTaskDiscordRefs, getDailyTaskById } = await import('./db.js');
+          const { createDailyTask, setDailyTaskDiscordRefs } = await import('./db.js');
           const { getPollManager } = await import('./poll-manager.js');
 
           // Create the task in database
@@ -1362,7 +1362,7 @@ Example format: ["🔍 Reproduce bug", "🐛 Find root cause", "💻 Write fix"]
         }
 
         try {
-          const { getDailyTaskById, updateDailyTaskPollData } = await import('./db.js');
+          const { getDailyTaskById } = await import('./db.js');
           const { getTaskStateManager } = await import('./task-state-manager.js');
 
           const task = getDailyTaskById(taskId);
@@ -1397,7 +1397,6 @@ Example format: ["🔍 Reproduce bug", "🐛 Find root cause", "💻 Write fix"]
 
       case 'mark_task_complete': {
         const taskId = typeof payload.task_id === 'string' ? payload.task_id : '';
-        const source = payload.source === 'poll' || payload.source === 'reaction' ? payload.source : 'manual';
 
         if (!taskId) {
           return { id: requestId, ok: false, error: 'task_id is required' };
@@ -1413,7 +1412,10 @@ Example format: ["🔍 Reproduce bug", "🐛 Find root cause", "💻 Write fix"]
           }
 
           const stateManager = getTaskStateManager();
-          await stateManager.markTaskComplete(taskId, source);
+          const sourceParam = payload.source === 'poll' || payload.source === 'reaction'
+            ? payload.source
+            : 'manual' as const;
+          await stateManager.markTaskComplete(taskId, sourceParam);
 
           return { id: requestId, ok: true, result: { completed: true } };
         } catch (err) {

@@ -1068,6 +1068,76 @@ async function handleAdminCommand(params: {
     return true;
   }
 
+  if (command === 'daily-plan' || command === 'plan') {
+    // Start daily planning conversation
+    const extraContext = args.length > 0 ? '\nUser provided context: ' + args.join(' ') : '';
+    const prompt = [
+      '[DAILY PLANNING]',
+      'Initiate a collaborative daily planning session with the user.',
+      '',
+      'Your role is to be a thoughtful accountability partner. Help the user plan their day with realistic goals.',
+      '',
+      'Process:',
+      '1. Gather context - use get_planning_context to see yesterday\'s outcomes and active tasks',
+      '2. Understand priorities - ask about deadlines, energy levels, focus areas',
+      '3. For each main task, use breakdown_task to create subtasks (max 10)',
+      '4. Push back on overcommitment - max 3-5 major tasks per day',
+      '5. For finalized tasks, use create_task_thread to make forum threads with polls',
+      '',
+      'Be conversational and encouraging. Celebrate yesterday\'s wins. Ask clarifying questions.',
+      'At the end, summarize the plan with all threads created.' + extraContext
+    ].join('\n');
+
+    try {
+      const traceBase = createTraceBase({
+        chatId: params.chatId,
+        groupFolder: group.folder,
+        userId: params.senderId,
+        inputText: prompt,
+        source: 'daily-planning'
+      });
+      const routingDecision = routeRequest();
+
+      const execution = await executeAgentRun({
+        group,
+        prompt,
+        chatJid: params.chatId,
+        userId: params.senderId,
+        recallQuery: 'daily planning tasks goals yesterday',
+        recallMaxResults: Math.max(5, routingDecision.recallMaxResults),
+        recallMaxTokens: routingDecision.recallMaxTokens,
+        sessionId: sessions[group.folder],
+        onSessionUpdate: (sessionId) => { sessions[group.folder] = sessionId; },
+        availableGroups: buildAvailableGroupsSnapshot(),
+        modelMaxOutputTokens: routingDecision.maxOutputTokens,
+        maxToolSteps: routingDecision.maxToolSteps,
+        lane: 'interactive',
+      });
+
+      const context = execution.context;
+      const output = execution.output;
+      const errorMessage = output.status === 'error' ? (output.error || 'Unknown error') : null;
+
+      if (context) {
+        recordAgentTelemetry({
+          traceBase,
+          output,
+          context,
+          toolAuditSource: 'daily-planning',
+          errorMessage: errorMessage ?? undefined,
+        });
+      }
+
+      if (errorMessage) {
+        await reply(`Daily planning failed: ${errorMessage}`);
+      }
+    } catch (err) {
+      logger.error({ err }, 'Daily planning agent run failed');
+      await reply(`Daily planning failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return true;
+  }
+
   // ═══════════════════════════════════════════════════════════════════════════════
   // End Daily Planning Commands
   // ═══════════════════════════════════════════════════════════════════════════════

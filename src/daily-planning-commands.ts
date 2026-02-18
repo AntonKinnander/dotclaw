@@ -8,6 +8,9 @@
 import { logger } from './logger.js';
 import { DATA_DIR, TIMEZONE } from './config.js';
 import { getDailyTaskById, getActiveDailyTasks, updateDailyTask, getLatestDailyJournal, getDailyJournalByDate } from './db.js';
+import { getRecapTrigger } from './recap-trigger.js';
+import fs from 'fs';
+import path from 'path';
 
 /**
  * Workflow configuration structure
@@ -378,5 +381,6 @@ export function getDailyPlanningCommandHandlers() {
     'archive-task': handleArchiveTask,
     'show-journal': handleShowJournal,
     'configure-workflow': handleConfigureWorkflow,
+    // Note: 'daily-plan' is handled directly in index.ts, not via command handlers
   };
 }

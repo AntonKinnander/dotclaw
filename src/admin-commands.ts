@@ -52,6 +52,9 @@ function normalizeCommand(tokens: string[]): ParsedCommand | null {
   if (first === 'recap') {
     return { command: 'recap', args: [secondRaw, ...rest].filter(Boolean) as string[] };
   }
+  if (first === 'plan' || (first === 'daily' && second === 'plan')) {
+    return { command: 'daily-plan', args: rest };
+  }
   if (first === 'journal') {
     const sub = second || '';
     if (sub === 'create' || sub === 'new') return { command: 'journal-create', args: rest };

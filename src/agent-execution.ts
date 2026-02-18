@@ -403,7 +403,7 @@ export function recordAgentTelemetry(params: {
   output: ContainerOutput | null;
   context: AgentContext;
   metricsSource?: string;
-  toolAuditSource: 'message' | 'scheduler' | 'heartbeat' | 'daily-briefing' | 'nightly-recap' | 'task-breakdown' | 'journal-command' | 'task-command';
+  toolAuditSource: 'message' | 'scheduler' | 'heartbeat' | 'daily-briefing' | 'nightly-recap' | 'task-breakdown' | 'journal-command' | 'task-command' | 'daily-planning';
   errorMessage?: string;
   errorType?: string;
   extraTimings?: Record<string, number>;

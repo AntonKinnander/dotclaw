@@ -155,7 +155,7 @@ export class RecapTrigger {
       timezone,
       recap_time,
       channel_id,
-      next_run,
+      next_run: nextRun,
     };
   }
 
@@ -185,7 +185,7 @@ export class RecapTrigger {
     }
 
     updateTask(taskId, { status: 'paused' });
-    logger.info({ group_folder, task_id: taskId }, 'Paused nightly recap');
+    logger.info({ group_folder: groupFolder, task_id: taskId }, 'Paused nightly recap');
     return true;
   }
 
@@ -203,7 +203,7 @@ export class RecapTrigger {
     }
 
     updateTask(taskId, { status: 'active' });
-    logger.info({ group_folder, task_id: taskId }, 'Resumed nightly recap');
+    logger.info({ group_folder: groupFolder, task_id: taskId }, 'Resumed nightly recap');
     return true;
   }
 
@@ -223,7 +223,7 @@ export class RecapTrigger {
     const { deleteTask } = require('./db.js');
     deleteTask(taskId);
 
-    logger.info({ group_folder, task_id: taskId }, 'Removed nightly recap');
+    logger.info({ group_folder: groupFolder, task_id: taskId }, 'Removed nightly recap');
     return true;
   }
 
@@ -237,7 +237,7 @@ export class RecapTrigger {
     // Get all tasks and find the recap task
     const { getAllTasks } = require('./db.js');
     const tasks = getAllTasks();
-    const recapTask = tasks.find(t =>
+    const recapTask = tasks.find((t: { group_folder: string; prompt?: string; schedule_type: string }) =>
       t.group_folder === groupFolder &&
       t.prompt?.startsWith('/recap') &&
       t.schedule_type === 'cron'
@@ -293,8 +293,8 @@ export class RecapTrigger {
     const tasks = getAllTasks();
 
     return tasks
-      .filter(t => t.prompt?.startsWith('/recap') && t.schedule_type === 'cron')
-      .map(task => {
+      .filter((t: { prompt?: string; schedule_type: string }) => t.prompt?.startsWith('/recap') && t.schedule_type === 'cron')
+      .map((task: { id: string; group_folder: string; schedule_value?: string; timezone?: string | null; chat_jid?: string; next_run?: string | null }) => {
         // Extract time from cron expression
         const cronMatch = task.schedule_value?.match(/^(\d+)\s+(\d+)\s+\*\s+\*\s+\*\*$/);
         let recapTime = '22:00';

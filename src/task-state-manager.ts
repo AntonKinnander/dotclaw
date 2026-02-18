@@ -15,12 +15,11 @@ import {
   getActiveDailyTasks,
   updateDailyTask,
   updateDailyTaskPollData,
-  setDailyTaskDiscordRefs,
   archiveOldDailyTasks,
-  type DailyTask,
 } from './db.js';
-import { getPollManager, type PollChecklist } from './poll-manager.js';
+import type { PollChecklist } from './poll-manager.js';
 import type { DiscordProvider } from './providers/discord/discord-provider.js';
+import type { DailyTask } from './types.js';
 
 /**
  * Task state snapshot stored on disk
@@ -164,7 +163,7 @@ export class TaskStateManager {
     if (!task.discord_channel_id || !task.discord_thread_id) {
       return {
         task_id: task.id,
-        status: task.status,
+        status: task.status as 'pending' | 'in_progress' | 'completed' | 'archived',
         poll_complete: false,
         last_sync: new Date().toISOString(),
         hash: computeHash(task.poll_data),
@@ -226,7 +225,7 @@ export class TaskStateManager {
 
       const stateEntry: TaskStateEntry = {
         task_id: task.id,
-        status: pollComplete ? 'completed' : task.status,
+        status: (pollComplete ? 'completed' : task.status) as 'pending' | 'in_progress' | 'completed' | 'archived',
         poll_complete: pollComplete,
         last_sync: new Date().toISOString(),
         hash: computeHash(updatedPollData || task.poll_data),
@@ -314,9 +313,9 @@ export class TaskStateManager {
    * Mark a task as complete
    *
    * @param taskId - Task ID to mark complete
-   * @param source - Source of completion ('poll' or 'reaction')
+   * @param source - Source of completion ('poll', 'reaction', or 'manual')
    */
-  async markTaskComplete(taskId: string, source: 'poll' | 'reaction'): Promise<void> {
+  async markTaskComplete(taskId: string, source: 'poll' | 'reaction' | 'manual'): Promise<void> {
     try {
       const task = getDailyTaskById(taskId);
       if (!task) {
@@ -366,14 +365,14 @@ export class TaskStateManager {
 
         // Check if overdue (has due_date and it's past)
         if (task.due_date && new Date(task.due_date) < now) {
-          result.overdue.push(task);
+          result.overdue.push(task as DailyTask);
         }
 
         // Check if ready to archive (completed and older than cutoff)
         if (task.status === 'completed' && task.completed_at) {
           const completedAt = new Date(task.completed_at);
           if (completedAt < archiveCutoff) {
-            result.readyToArchive.push(task);
+            result.readyToArchive.push(task as DailyTask);
           }
         }
       }
