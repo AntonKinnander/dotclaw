@@ -1268,6 +1268,263 @@ Example format: ["🔍 Reproduce bug", "🐛 Find root cause", "💻 Write fix"]
           return { id: requestId, ok: false, error: errMsg };
         }
       }
+
+      // ── Daily Planning IPC Actions ─────────────────────────────────────────────
+
+      case 'create_task_thread': {
+        const taskTitle = typeof payload.title === 'string' ? payload.title.trim() : '';
+        const subtasks = Array.isArray(payload.subtasks)
+          ? (payload.subtasks as string[]).filter(s => typeof s === 'string')
+          : [];
+        const forumChannelId = typeof payload.forum_channel_id === 'string' ? payload.forum_channel_id : '';
+
+        if (!taskTitle || !forumChannelId) {
+          return { id: requestId, ok: false, error: 'title and forum_channel_id are required' };
+        }
+
+        if (subtasks.length > 10) {
+          return { id: requestId, ok: false, error: 'Maximum 10 subtasks allowed' };
+        }
+
+        try {
+          // Import daily planning functions
+          const { createDailyTask, setDailyTaskDiscordRefs, getDailyTaskById } = await import('./db.js');
+          const { getPollManager } = await import('./poll-manager.js');
+
+          // Create the task in database
+          const taskId = createDailyTask({
+            group_folder: sourceGroup,
+            title: taskTitle,
+            description: typeof payload.description === 'string' ? payload.description : undefined,
+            due_date: typeof payload.due_date === 'string' ? payload.due_date : undefined,
+            priority: typeof payload.priority === 'number' ? payload.priority : 0,
+          });
+
+          // Get Discord provider
+          const provider = deps.registry.getProviderForChat(`discord:${forumChannelId}`);
+
+          if (!provider) {
+            return { id: requestId, ok: false, error: 'Discord provider not available' };
+          }
+
+          // Create forum thread
+          const threadResult = await (provider as any).createForumThread(
+            forumChannelId,
+            taskTitle,
+            typeof payload.description === 'string' ? payload.description : taskTitle
+          );
+
+          if (!threadResult.success || !threadResult.threadId) {
+            return { id: requestId, ok: false, error: 'Failed to create forum thread' };
+          }
+
+          // Create poll if subtasks provided
+          let pollId: string | null = null;
+          if (subtasks.length > 0) {
+            const pollManager = getPollManager();
+            pollManager.setDiscordProvider(provider as any);
+
+            const pollResult = await pollManager.createTaskPoll(
+              taskId,
+              taskTitle,
+              subtasks,
+              forumChannelId,
+              threadResult.threadId
+            );
+
+            if (pollResult.pollId) {
+              pollId = pollResult.pollId;
+            }
+          }
+
+          // Update Discord references
+          setDailyTaskDiscordRefs(taskId, forumChannelId, threadResult.threadId, pollId);
+
+          return {
+            id: requestId,
+            ok: true,
+            result: {
+              task_id: taskId,
+              thread_id: threadResult.threadId,
+              poll_id: pollId,
+            }
+          };
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          return { id: requestId, ok: false, error: errMsg };
+        }
+      }
+
+      case 'sync_task_poll': {
+        const taskId = typeof payload.task_id === 'string' ? payload.task_id : '';
+        if (!taskId) {
+          return { id: requestId, ok: false, error: 'task_id is required' };
+        }
+
+        try {
+          const { getDailyTaskById, updateDailyTaskPollData } = await import('./db.js');
+          const { getTaskStateManager } = await import('./task-state-manager.js');
+
+          const task = getDailyTaskById(taskId);
+          if (!task) {
+            return { id: requestId, ok: false, error: 'Task not found' };
+          }
+
+          const stateManager = getTaskStateManager();
+          const state = await stateManager.syncTaskState(taskId);
+
+          if (!state) {
+            return { id: requestId, ok: false, error: 'Failed to sync task state' };
+          }
+
+          // Get updated task for current poll data
+          const updatedTask = getDailyTaskById(taskId);
+
+          return {
+            id: requestId,
+            ok: true,
+            result: {
+              poll_data: updatedTask?.poll_data,
+              complete: state.poll_complete,
+              status: state.status,
+            }
+          };
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          return { id: requestId, ok: false, error: errMsg };
+        }
+      }
+
+      case 'mark_task_complete': {
+        const taskId = typeof payload.task_id === 'string' ? payload.task_id : '';
+        const source = payload.source === 'poll' || payload.source === 'reaction' ? payload.source : 'manual';
+
+        if (!taskId) {
+          return { id: requestId, ok: false, error: 'task_id is required' };
+        }
+
+        try {
+          const { getDailyTaskById } = await import('./db.js');
+          const { getTaskStateManager } = await import('./task-state-manager.js');
+
+          const task = getDailyTaskById(taskId);
+          if (!task) {
+            return { id: requestId, ok: false, error: 'Task not found' };
+          }
+
+          const stateManager = getTaskStateManager();
+          await stateManager.markTaskComplete(taskId, source);
+
+          return { id: requestId, ok: true, result: { completed: true } };
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          return { id: requestId, ok: false, error: errMsg };
+        }
+      }
+
+      case 'get_daily_tasks': {
+        try {
+          const { getActiveDailyTasks } = await import('./db.js');
+
+          const tasks = getActiveDailyTasks(sourceGroup);
+          const tasks_serializable = tasks.map(t => ({
+            id: t.id,
+            title: t.title,
+            description: t.description,
+            status: t.status,
+            priority: t.priority,
+            tags: t.tags ? JSON.parse(t.tags) : null,
+            created_at: t.created_at,
+            due_date: t.due_date,
+            completed_at: t.completed_at,
+            discord_thread_id: t.discord_thread_id,
+            poll_data: t.poll_data ? JSON.parse(t.poll_data) : null,
+          }));
+
+          return { id: requestId, ok: true, result: { tasks: tasks_serializable } };
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          return { id: requestId, ok: false, error: errMsg };
+        }
+      }
+
+      case 'create_journal': {
+        const date = typeof payload.date === 'string' ? payload.date : new Date().toISOString().split('T')[0];
+        const tasksCompleted = Array.isArray(payload.tasks_completed)
+          ? (payload.tasks_completed as string[])
+          : [];
+        const tasksInProgress = Array.isArray(payload.tasks_in_progress)
+          ? (payload.tasks_in_progress as string[])
+          : [];
+        const sentiment = payload.sentiment === 'positive' || payload.sentiment === 'negative' || payload.sentiment === 'neutral'
+          ? payload.sentiment
+          : 'neutral';
+        const biggestSuccess = typeof payload.biggest_success === 'string' ? payload.biggest_success : undefined;
+        const biggestError = typeof payload.biggest_error === 'string' ? payload.biggest_error : undefined;
+        const focusTomorrow = typeof payload.focus_tomorrow === 'string' ? payload.focus_tomorrow : undefined;
+        const diaryEntry = typeof payload.diary_entry === 'string' ? payload.diary_entry : undefined;
+
+        try {
+          const { createDailyJournal } = await import('./db.js');
+
+          const journalId = createDailyJournal({
+            group_folder: sourceGroup,
+            date,
+            tasks_completed: tasksCompleted,
+            tasks_in_progress: tasksInProgress,
+            sentiment,
+            biggest_success: biggestSuccess,
+            biggest_error: biggestError,
+            focus_tomorrow: focusTomorrow,
+            diary_entry: diaryEntry,
+          });
+
+          return { id: requestId, ok: true, result: { journal_id: journalId } };
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          return { id: requestId, ok: false, error: errMsg };
+        }
+      }
+
+      case 'get_planning_context': {
+        try {
+          const { getActiveDailyTasks, getLatestDailyJournal } = await import('./db.js');
+
+          const activeTasks = getActiveDailyTasks(sourceGroup);
+          const latestJournal = getLatestDailyJournal(sourceGroup);
+
+          const inProgress = activeTasks
+            .filter(t => t.status === 'in_progress')
+            .map(t => ({ id: t.id, title: t.title, priority: t.priority }));
+
+          const yesterdayOutcomes = latestJournal
+            ? {
+                tasks_completed: JSON.parse(latestJournal.tasks_completed || '[]'),
+                sentiment: latestJournal.sentiment,
+                focus_tomorrow: latestJournal.focus_tomorrow,
+              }
+            : null;
+
+          const currentGoals = activeTasks
+            .filter(t => t.status === 'pending' || t.status === 'in_progress')
+            .map(t => ({ id: t.id, title: t.title, priority: t.priority }))
+            .slice(0, 5);
+
+          return {
+            id: requestId,
+            ok: true,
+            result: {
+              in_progress: inProgress,
+              yesterday_outcomes: yesterdayOutcomes,
+              current_goals: currentGoals,
+            }
+          };
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          return { id: requestId, ok: false, error: errMsg };
+        }
+      }
+
       default:
         return { id: requestId, ok: false, error: `Unknown request type: ${data.type}` };
     }

@@ -904,7 +904,6 @@ async function handleAdminCommand(params: {
         inputText: prompt,
         source: 'task-breakdown'
       });
-      const routingDecision = routeRequest();
 
       const execution = await executeAgentRun({
         group,
@@ -948,14 +947,13 @@ async function handleAdminCommand(params: {
 
   if (command === 'journal-today' || command === 'journal-create' || command === 'journal-list' || command === 'journal-update') {
     // Journal commands - let agent handle with tool access
-    const subCommand = command.replace('journal-', '');
     const prompt = command === 'journal-today'
       ? '[JOURNAL TODAY]\nShow today\'s journal entry if it exists. Use getDailyJournalByDate with today\'s date. If no entry, say so and offer to create one.'
       : command === 'journal-create'
-      ? `[JOURNAL CREATE]\nCreate a journal entry for today with the following: ${args.join(' ') || '(no additional details provided)'}\nUse createDailyJournal tool. Gather any missing info through conversation.'
+      ? '[JOURNAL CREATE]\nCreate a journal entry for today with: ' + (args.join(' ') || '(no additional details provided)') + '\nUse createDailyJournal tool. Gather any missing info through conversation.'
       : command === 'journal-list'
-      ? `[JOURNAL LIST]\nList recent journal entries (limit: ${args[0] || '7'}). Use listDailyJournals tool.`
-      : `[JOURNAL UPDATE]\nUpdate today\'s journal with: ${args.join(' ')}\nUse updateDailyJournal tool.`;
+      ? '[JOURNAL LIST]\nList recent journal entries (limit: ' + (args[0] || '7') + '). Use listDailyJournals tool.'
+      : '[JOURNAL UPDATE]\nUpdate today\'s journal with: ' + args.join(' ') + '\nUse updateDailyJournal tool.';
 
     try {
       const traceBase = createTraceBase({
@@ -965,7 +963,6 @@ async function handleAdminCommand(params: {
         inputText: prompt,
         source: 'journal-command'
       });
-      const routingDecision = routeRequest();
 
       const execution = await executeAgentRun({
         group,
@@ -1013,14 +1010,14 @@ async function handleAdminCommand(params: {
     const prompt = subCommand === 'list'
       ? '[TASK LIST]\nList all active (non-archived) tasks. Use getActiveDailyTasks tool. Show status, priority, and due dates.'
       : subCommand === 'status'
-      ? `[TASK STATUS]\nShow status for task ID: ${args[0] || '(not provided)'}\nUse getDailyTaskById tool. If no ID provided, ask for it.`
+      ? '[TASK STATUS]\nShow status for task ID: ' + (args[0] || '(not provided)') + '\nUse getDailyTaskById tool. If no ID provided, ask for it.'
       : subCommand === 'complete'
-      ? `[TASK COMPLETE]\nMark task as complete: ${args[0] || '(not provided)'}\nUse updateDailyTask to set status to "completed".`
+      ? '[TASK COMPLETE]\nMark task as complete: ' + (args[0] || '(not provided)') + '\nUse updateDailyTask to set status to \"completed\".'
       : subCommand === 'create'
-      ? `[TASK CREATE]\nCreate a new task: ${args.join(' ') || '(not provided)'}\nUse createDailyTask tool. Ask for any missing required info.`
+      ? '[TASK CREATE]\nCreate a new task: ' + (args.join(' ') || '(not provided)') + '\nUse createDailyTask tool. Ask for any missing required info.'
       : subCommand === 'archive'
-      ? `[TASK ARCHIVE]\nArchive task: ${args[0] || '(not provided)'}\nUse updateDailyTask to set status to "archived".`
-      : `[TASK ${subCommand.toUpperCase()}]\n${args.join(' ') || '(no args provided)'}\nUse appropriate daily task tools.`;
+      ? '[TASK ARCHIVE]\nArchive task: ' + (args[0] || '(not provided)') + '\nUse updateDailyTask to set status to \"archived\".'
+      : '[TASK ' + subCommand.toUpperCase() + ']\n' + (args.join(' ') || '(no args provided)') + '\nUse appropriate daily task tools.';
 
     try {
       const traceBase = createTraceBase({
@@ -1030,7 +1027,6 @@ async function handleAdminCommand(params: {
         inputText: prompt,
         source: 'task-command'
       });
-      const routingDecision = routeRequest();
 
       const execution = await executeAgentRun({
         group,

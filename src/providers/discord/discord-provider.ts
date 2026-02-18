@@ -314,6 +314,185 @@ export class DiscordProvider implements MessagingProvider {
     }
   }
 
+  // ── Daily Planning: Forum Thread Operations ───────────────────────────────────
+
+  /**
+   * Create a forum thread in a forum channel.
+   * Used for creating task threads in the TO-DO forum.
+   *
+   * @param channelId - The forum channel ID
+   * @param title - Thread title
+   * @param content - Initial message content
+   * @param tags - Optional array of tag IDs to apply
+   * @returns Thread creation result with thread ID
+   */
+  async createForumThread(
+    channelId: string,
+    title: string,
+    content: string,
+    tags: string[] = []
+  ): Promise<{ success: boolean; threadId: string | null; messageId: string | null }> {
+    try {
+      const channel = await this.fetchChannel(channelId);
+      if (!channel) {
+        logger.error({ channelId }, 'Channel not found for createForumThread');
+        return { success: false, threadId: null, messageId: null };
+      }
+
+      // Check if channel is a forum channel
+      if (!this.discordJs || channel.type !== this.discordJs.ChannelType.GuildForum) {
+        logger.warn({ channelId }, 'Channel is not a forum channel');
+        return { success: false, threadId: null, messageId: null };
+      }
+
+      // Create thread with tags if available
+      const threadOptions: Record<string, unknown> = {
+        name: title,
+        message: { content },
+      };
+
+      // Apply tags if provided and forum has tags
+      if (tags.length > 0 && channel.availableTags) {
+        const tagIds = tags.filter(tagId =>
+          channel.availableTags.some((t: { id: string }) => t.id === tagId)
+        );
+        if (tagIds.length > 0) {
+          threadOptions.appliedTags = tagIds;
+        }
+      }
+
+      const thread = await channel.threads.create(threadOptions);
+      logger.info({ channelId, threadId: thread.id, title }, 'Created forum thread');
+
+      return {
+        success: true,
+        threadId: String(thread.id),
+        messageId: thread.initialPostId ? String(thread.initialPostId) : null,
+      };
+    } catch (err) {
+      logger.error({ channelId, title, err }, 'Failed to create forum thread');
+      return { success: false, threadId: null, messageId: null };
+    }
+  }
+
+  /**
+   * Fetch poll results from a message containing a poll.
+   *
+   * @param channelId - Discord channel ID
+   * @param messageId - Discord message ID containing the poll
+   * @returns Poll results or null
+   */
+  async getPollResults(
+    channelId: string,
+    messageId: string
+  ): Promise<{
+    question: string;
+    answers: Array<{ id: number; text: string; voteCount: number }>;
+  } | null> {
+    try {
+      const channel = await this.fetchChannel(channelId);
+      if (!channel) return null;
+
+      const message: DiscordMessage = await channel.messages.fetch(messageId);
+      if (!message.poll) return null;
+
+      // Discord v14.15+ poll structure
+      const poll = message.poll;
+      const results = {
+        question: poll.question.text,
+        answers: poll.answers.map((ans: { text: { text: string }; id: number; voteCount?: number }) => ({
+          id: ans.id,
+          text: ans.text.text,
+          voteCount: ans.voteCount ?? 0,
+        })),
+      };
+
+      logger.debug({ messageId, answerCount: results.answers.length }, 'Fetched poll results');
+      return results;
+    } catch (err) {
+      logger.error({ channelId, messageId, err }, 'Failed to get poll results');
+      return null;
+    }
+  }
+
+  /**
+   * Archive (lock) a forum thread.
+   *
+   * @param threadId - The thread ID to archive
+   */
+  async archiveThread(threadId: string): Promise<void> {
+    try {
+      const channel = await this.fetchChannel(threadId);
+      if (!channel) {
+        logger.warn({ threadId }, 'Thread not found for archive');
+        return;
+      }
+
+      // Lock the thread (archive functionality)
+      await channel.setLocked(true);
+      await channel.setArchived(true);
+
+      logger.info({ threadId }, 'Archived forum thread');
+    } catch (err) {
+      logger.error({ threadId, err }, 'Failed to archive thread');
+    }
+  }
+
+  /**
+   * Lock a thread (prevent new replies).
+   *
+   * @param threadId - The thread ID to lock
+   */
+  async lockThread(threadId: string): Promise<void> {
+    try {
+      const channel = await this.fetchChannel(threadId);
+      if (!channel) {
+        logger.warn({ threadId }, 'Thread not found for lock');
+        return;
+      }
+
+      await channel.setLocked(true);
+
+      logger.info({ threadId }, 'Locked thread');
+    } catch (err) {
+      logger.error({ threadId, err }, 'Failed to lock thread');
+    }
+  }
+
+  /**
+   * Get reactions on a message.
+   * Used to detect completion via ✅ reaction.
+   *
+   * @param channelId - Discord channel ID
+   * @param messageId - Discord message ID
+   * @returns Array of reactions with emoji and count
+   */
+  async getReactions(
+    channelId: string,
+    messageId: string
+  ): Promise<Array<{ emoji: string; count: number }>> {
+    try {
+      const channel = await this.fetchChannel(channelId);
+      if (!channel) return [];
+
+      const message: DiscordMessage = await channel.messages.fetch(messageId);
+      if (!message.reactions) return [];
+
+      const reactions: Array<{ emoji: string; count: number }> = [];
+      message.reactions.cache.forEach((reaction: DiscordMessage) => {
+        reactions.push({
+          emoji: reaction.emoji?.name || '',
+          count: reaction.count || 0,
+        });
+      });
+
+      return reactions;
+    } catch (err) {
+      logger.error({ channelId, messageId, err }, 'Failed to get reactions');
+      return [];
+    }
+  }
+
   async sendButtons(chatId: string, text: string, buttons: ButtonRow[]): Promise<SendResult> {
     const rawChannelId = ProviderRegistry.stripPrefix(chatId);
     if (!this.discordJs) return { success: false };
@@ -793,6 +972,30 @@ export class DiscordProvider implements MessagingProvider {
         handlers.onButtonClick(chatId, senderId, senderName, entry.label, entry.data, threadId);
       } catch (err) {
         logger.debug({ err }, 'Error handling Discord interactionCreate');
+      }
+    });
+
+    // Handle poll votes - Discord v14.15+
+    this.client.on('pollVoteAdd', (vote: DiscordMessage) => {
+      try {
+        const userId = String(vote.user?.id);
+        const channelId = String(vote.poll.channelId);
+        const messageId = String(vote.poll.messageId);
+        const answerId = vote.answer?.id;
+
+        logger.debug({ userId, channelId, messageId, answerId }, 'Poll vote received');
+
+        // Emit through onReaction handler with special emoji prefix for poll votes
+        // This allows existing reaction handling to also process poll votes
+        const pollEmoji = '📊';  // Special emoji for poll votes
+        handlers.onReaction(
+          ProviderRegistry.addPrefix('discord', channelId),
+          messageId,
+          userId,
+          `${pollEmoji}:${answerId}`
+        );
+      } catch (err) {
+        logger.error({ err }, 'Error handling Discord pollVoteAdd');
       }
     });
   }

@@ -73,6 +73,27 @@ function normalizeCommand(tokens: string[]): ParsedCommand | null {
   if (first === 'breakdown') {
     return { command: 'breakdown', args: [secondRaw, ...rest].filter(Boolean) as string[] };
   }
+  if (first === 'schedule' && second === 'recap') {
+    return { command: 'schedule-recap', args: rest };
+  }
+  if (first === 'show' && second === 'schedule') {
+    return { command: 'show-schedule', args: rest };
+  }
+  if (first === 'planning' && second === 'status') {
+    return { command: 'planning-status', args: rest };
+  }
+  if (first === 'complete' && second === 'task') {
+    return { command: 'complete-task', args: rest };
+  }
+  if (first === 'archive' && second === 'task') {
+    return { command: 'archive-task', args: rest };
+  }
+  if (first === 'show' && second === 'journal') {
+    return { command: 'show-journal', args: rest };
+  }
+  if (first === 'configure' && second === 'workflow') {
+    return { command: 'configure-workflow', args: rest };
+  }
   if (first === 'skill') {
     const sub = second || '';
     if (sub === 'install') return { command: 'skill-install', args: rest };
