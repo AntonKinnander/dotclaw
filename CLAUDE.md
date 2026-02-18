@@ -254,3 +254,40 @@ Skills are markdown files discovered at runtime from `/workspace/group/skills/` 
 | `/setup` | First-time installation, authentication, service configuration |
 | `/customize` | Adding channels, integrations, changing behavior |
 | `/debug` | Container issues, logs, troubleshooting |
+
+## Discord Development Guidance
+
+When working with Discord-related features in this codebase:
+
+1. **Documentation Resources**: Use Google's NotebookLM or official Discord.js documentation when uncertain about Discord API specifics. Discord.js v14+ documentation at https://discord.js.org and Discord API docs at https://discord.com/developers/docs/intro are authoritative sources.
+
+2. **Consult Before Sensitive Decisions**: When making decisions that could:
+   - Break existing Discord integrations
+   - Change channel/thread/poll management
+   - Modify permission requirements
+   - Affect data persistence or state management
+
+   Always ask for confirmation first or explain the approach and wait for user approval.
+
+3. **Key Discord Patterns in This Codebase**:
+   - Forum threads for task organization (planned in daily planning workflow)
+   - Native polls for checklists (multi-select, max 10 options)
+   - Reactions for completion tracking (✅ override)
+   - Channel type detection (text, forum, voice, announcement)
+   - Message threading support
+
+## Daily Planning & Briefing Workflow (Planned)
+
+A comprehensive productivity workflow is planned for this codebase. See:
+- `.planning/BRIEF.md` - Project vision and requirements
+- `.planning/ROADMAP.md` - Phase breakdown (3 milestones, 11 phases)
+- `.planning/phases/` - Detailed implementation plans for each phase
+
+**Planned Features** (marked with `[[double brackets]]` in `features.md`):
+- Daily morning briefings
+- Collaborative daily planning with accountability
+- Forum-based TO-DO system with poll checklists
+- Nightly recap conversations
+- Structured journal entries
+
+Each phase is independently executable and scoped to 2-3 tasks for quality.

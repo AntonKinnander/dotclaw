@@ -129,7 +129,8 @@ export class DiscordProvider implements MessagingProvider {
     defaultSkill?: string;
   } | undefined {
     const chatId = ProviderRegistry.addPrefix('discord', channelId);
-    const group = this.config.registeredGroups()[chatId];
+    const groups = this.config.registeredGroups();
+    const group = groups[chatId];
     if (group?.discord) {
       return {
         channelId: group.discord.channelId,
@@ -707,16 +708,6 @@ export class DiscordProvider implements MessagingProvider {
             referencedMessage = { author: { id: String(cachedRef.author.id) } };
           }
         }
-
-        // Debug: Log channel config
-        logger.debug({
-          channelId: rawChannelId,
-          channelConfigFound: !!channelConfig,
-          channelName: channelConfig?.channelName,
-          channelDescription: channelConfig?.description,
-          channelType: channelConfig?.channelType,
-          defaultSkill: channelConfig?.defaultSkill
-        }, 'Discord channel config retrieved');
 
         const incoming: IncomingMessage = {
           chatId,

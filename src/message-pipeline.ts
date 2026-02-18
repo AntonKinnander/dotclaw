@@ -311,6 +311,12 @@ export function createMessagePipeline(deps: MessagePipelineDeps) {
         if (batch.length === 0) break;
         iterations++;
         const last = batch[batch.length - 1];
+
+        // Get registered groups for fallback channel context
+        // This handles old queued messages that have NULL channel context values
+        const registeredGroups = deps.registeredGroups();
+        const groupMetadata = registeredGroups[last.chat_jid];
+
         const triggerMsg: PipelineMessage = {
           chatId: last.chat_jid,
           messageId: last.message_id,
@@ -321,12 +327,12 @@ export function createMessagePipeline(deps: MessagePipelineDeps) {
           isGroup: last.is_group === 1,
           chatType: last.chat_type,
           threadId: last.message_thread_id != null ? String(last.message_thread_id) : undefined,
-          // Channel context from database
-          channelName: last.channel_name ?? undefined,
-          channelDescription: last.channel_description ?? undefined,
-          channelConfigType: last.channel_config_type ?? undefined,
-          channelType: last.channel_type ?? undefined,
-          defaultSkill: last.default_skill ?? undefined,
+          // Channel context from database - fall back to registered_groups if NULL
+          channelName: last.channel_name ?? groupMetadata?.discord?.channelName ?? undefined,
+          channelDescription: last.channel_description ?? groupMetadata?.discord?.description ?? undefined,
+          channelConfigType: last.channel_config_type ?? groupMetadata?.discord?.channelType ?? undefined,
+          channelType: last.channel_type ?? groupMetadata?.discord?.channelType ?? undefined,
+          defaultSkill: last.default_skill ?? groupMetadata?.discord?.defaultSkill ?? undefined,
           parentId: last.parent_id ?? undefined,
           isForumThread: last.is_forum_thread === 1,
         };
@@ -557,7 +563,10 @@ export function createMessagePipeline(deps: MessagePipelineDeps) {
       group: group.name,
       messageCount: missedMessages.length,
       promptMessageCount: selectedMessages.length,
-      omittedPromptMessages
+      omittedPromptMessages,
+      // Log first 200 chars of user message for debugging
+      userMessage: msg.content.slice(0, 200),
+      userMessageLength: msg.content.length,
     }, 'Processing message');
 
     void emitHook('message:processing', {
@@ -794,6 +803,15 @@ export function createMessagePipeline(deps: MessagePipelineDeps) {
       }
       // Skip sending; still record telemetry below
     } else if (output.result && output.result.trim()) {
+      // Log first 200 chars of assistant response for debugging
+      logger.info({
+        chatId: msg.chatId,
+        group: group.name,
+        // Log first 200 chars of assistant response
+        assistantResponse: output.result.slice(0, 200),
+        responseLength: output.result.length,
+      }, 'Agent response ready');
+
       const hasVoiceAttachment = selectedMessages.some(m => {
         if (!m.attachments_json) return false;
         try {
