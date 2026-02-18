@@ -33,17 +33,6 @@ import {
   recordUserFeedback,
   getChatsWithPendingMessages,
   resetStalledMessages,
-  getLatestDailyJournal,
-  getDailyTasksForDate,
-  getLatestDailyBriefing,
-  createDailyJournal,
-  createDailyTask,
-  getActiveDailyTasks,
-  updateDailyTask,
-  getDailyTaskById,
-  listDailyJournals,
-  getDailyJournalByDate,
-  updateDailyJournal,
 } from './db.js';
 import { startSchedulerLoop, stopSchedulerLoop } from './task-scheduler.js';
 import type { ContainerOutput } from './container-protocol.js';
@@ -737,6 +726,355 @@ async function handleAdminCommand(params: {
     }
     return true;
   }
+
+  // ═══════════════════════════════════════════════════════════════════════════════
+  // Daily Planning Commands
+  // ═══════════════════════════════════════════════════════════════════════════════
+
+  if (command === 'briefing') {
+    // Generate daily briefing via agent
+    const prompt = [
+      '[DAILY BRIEFING]',
+      'Generate a personalized daily briefing for the user. Gather context from:',
+      '- Latest journal entries (mood, successes, errors, focus areas)',
+      '- Active and pending tasks',
+      '- Memory (facts, preferences, patterns)',
+      '- Relevant files/docs in the workspace',
+      '',
+      'Create an actionable morning brief that:',
+      '1. Summarizes yesterday\'s key outcomes (from journal if available)',
+      '2. Lists carry-over tasks and priorities',
+      '3. Identifies focus areas based on goals and patterns',
+      '4. Provides actionable recommendations for today',
+      '',
+      'Use tools to gather data. Spawn subagents for deeper research if needed.',
+      'Format as a clean, readable brief with sections.'
+    ].join('\n');
+
+    try {
+      const traceBase = createTraceBase({
+        chatId: params.chatId,
+        groupFolder: group.folder,
+        userId: params.senderId,
+        inputText: prompt,
+        source: 'daily-briefing'
+      });
+      const routingDecision = routeRequest();
+
+      const execution = await executeAgentRun({
+        group,
+        prompt,
+        chatJid: params.chatId,
+        userId: params.senderId,
+        recallQuery: 'daily briefing journal tasks goals',
+        recallMaxResults: routingDecision.recallMaxResults,
+        recallMaxTokens: routingDecision.recallMaxTokens,
+        sessionId: sessions[group.folder],
+        onSessionUpdate: (sessionId) => { sessions[group.folder] = sessionId; },
+        availableGroups: buildAvailableGroupsSnapshot(),
+        modelMaxOutputTokens: routingDecision.maxOutputTokens,
+        maxToolSteps: routingDecision.maxToolSteps,
+        lane: 'interactive',
+      });
+
+      const context = execution.context;
+      const output = execution.output;
+      const errorMessage = output.status === 'error' ? (output.error || 'Unknown error') : null;
+
+      if (context) {
+        recordAgentTelemetry({
+          traceBase,
+          output,
+          context,
+          toolAuditSource: 'daily-briefing',
+          errorMessage: errorMessage ?? undefined,
+        });
+      }
+
+      if (errorMessage) {
+        await reply(`Briefing generation failed: ${errorMessage}`);
+      }
+      // Agent response is delivered via provider
+    } catch (err) {
+      logger.error({ err }, 'Briefing agent run failed');
+      await reply(`Briefing generation failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return true;
+  }
+
+  if (command === 'recap') {
+    // Start nightly recap conversation
+    const prompt = [
+      '[NIGHTLY RECAP]',
+      'Initiate a conversational nightly review with the user.',
+      '',
+      'Your goal is to gather end-of-day reflections through natural dialogue, not an interview script.',
+      'Gather naturally:',
+      '- Overall sentiment for the day',
+      '- Biggest wins and successes',
+      '- Any mistakes or learning moments',
+      "- Highlights and lowlights (don't force it if user doesn't want to share)",
+      '- Focus for tomorrow',
+      '',
+      'As you learn things, create a structured journal entry using the daily_journal database table.',
+      'Be conversational and empathetic - this is a reflection, not an interrogation.',
+      'End by summarizing the journal entry you created.'
+    ].join('\n');
+
+    try {
+      const traceBase = createTraceBase({
+        chatId: params.chatId,
+        groupFolder: group.folder,
+        userId: params.senderId,
+        inputText: prompt,
+        source: 'nightly-recap'
+      });
+      const routingDecision = routeRequest();
+
+      const execution = await executeAgentRun({
+        group,
+        prompt,
+        chatJid: params.chatId,
+        userId: params.senderId,
+        recallQuery: 'nightly recap journal daily reflection',
+        recallMaxResults: Math.max(4, routingDecision.recallMaxResults - 2),
+        recallMaxTokens: routingDecision.recallMaxTokens,
+        sessionId: sessions[group.folder],
+        onSessionUpdate: (sessionId) => { sessions[group.folder] = sessionId; },
+        availableGroups: buildAvailableGroupsSnapshot(),
+        modelMaxOutputTokens: routingDecision.maxOutputTokens,
+        maxToolSteps: routingDecision.maxToolSteps,
+        lane: 'interactive',
+      });
+
+      const context = execution.context;
+      const output = execution.output;
+      const errorMessage = output.status === 'error' ? (output.error || 'Unknown error') : null;
+
+      if (context) {
+        recordAgentTelemetry({
+          traceBase,
+          output,
+          context,
+          toolAuditSource: 'nightly-recap',
+          errorMessage: errorMessage ?? undefined,
+        });
+      }
+
+      if (errorMessage) {
+        await reply(`Recap failed: ${errorMessage}`);
+      }
+    } catch (err) {
+      logger.error({ err }, 'Recap agent run failed');
+      await reply(`Recap failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return true;
+  }
+
+  if (command === 'breakdown') {
+    const taskDescription = args.join(' ').trim();
+    if (!taskDescription) {
+      await reply('Usage: /breakdown <task description>\nExample: /breakdown Build a Discord bot for daily planning');
+      return true;
+    }
+
+    const prompt = [
+      '[TASK BREAKDOWN]',
+      `Break down the following task into atomic, actionable subtasks (3-10 max):`,
+      '',
+      `Task: ${taskDescription}`,
+      '',
+      'Requirements:',
+      '- Each subtask should be independently completable',
+      '- Order them logically (dependencies first)',
+      '- Use emoji prefixes for visual clarity',
+      '- Keep titles under 55 characters',
+      '',
+      'Return ONLY a JSON array of subtask strings, e.g.:',
+      '["📋 Design system architecture", "🔧 Set up discord.js", "🧪 Write tests"]',
+      '',
+      'After generating, offer to create these as tasks with Discord forum threads and polls.'
+    ].join('\n');
+
+    try {
+      const traceBase = createTraceBase({
+        chatId: params.chatId,
+        groupFolder: group.folder,
+        userId: params.senderId,
+        inputText: prompt,
+        source: 'task-breakdown'
+      });
+      const routingDecision = routeRequest();
+
+      const execution = await executeAgentRun({
+        group,
+        prompt,
+        chatJid: params.chatId,
+        userId: params.senderId,
+        recallQuery: 'task breakdown planning subtasks',
+        recallMaxResults: 4,
+        recallMaxTokens: 400,
+        sessionId: sessions[group.folder],
+        onSessionUpdate: (sessionId) => { sessions[group.folder] = sessionId; },
+        availableGroups: buildAvailableGroupsSnapshot(),
+        modelMaxOutputTokens: 1000,
+        maxToolSteps: 50,
+        lane: 'interactive',
+      });
+
+      const context = execution.context;
+      const output = execution.output;
+      const errorMessage = output.status === 'error' ? (output.error || 'Unknown error') : null;
+
+      if (context) {
+        recordAgentTelemetry({
+          traceBase,
+          output,
+          context,
+          toolAuditSource: 'task-breakdown',
+          errorMessage: errorMessage ?? undefined,
+        });
+      }
+
+      if (errorMessage) {
+        await reply(`Breakdown failed: ${errorMessage}`);
+      }
+    } catch (err) {
+      logger.error({ err }, 'Breakdown agent run failed');
+      await reply(`Breakdown failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return true;
+  }
+
+  if (command === 'journal-today' || command === 'journal-create' || command === 'journal-list' || command === 'journal-update') {
+    // Journal commands - let agent handle with tool access
+    const subCommand = command.replace('journal-', '');
+    const prompt = command === 'journal-today'
+      ? '[JOURNAL TODAY]\nShow today\'s journal entry if it exists. Use getDailyJournalByDate with today\'s date. If no entry, say so and offer to create one.'
+      : command === 'journal-create'
+      ? `[JOURNAL CREATE]\nCreate a journal entry for today with the following: ${args.join(' ') || '(no additional details provided)'}\nUse createDailyJournal tool. Gather any missing info through conversation.'
+      : command === 'journal-list'
+      ? `[JOURNAL LIST]\nList recent journal entries (limit: ${args[0] || '7'}). Use listDailyJournals tool.`
+      : `[JOURNAL UPDATE]\nUpdate today\'s journal with: ${args.join(' ')}\nUse updateDailyJournal tool.`;
+
+    try {
+      const traceBase = createTraceBase({
+        chatId: params.chatId,
+        groupFolder: group.folder,
+        userId: params.senderId,
+        inputText: prompt,
+        source: 'journal-command'
+      });
+      const routingDecision = routeRequest();
+
+      const execution = await executeAgentRun({
+        group,
+        prompt,
+        chatJid: params.chatId,
+        userId: params.senderId,
+        recallQuery: 'journal daily entry',
+        recallMaxResults: 3,
+        recallMaxTokens: 300,
+        sessionId: sessions[group.folder],
+        onSessionUpdate: (sessionId) => { sessions[group.folder] = sessionId; },
+        availableGroups: buildAvailableGroupsSnapshot(),
+        modelMaxOutputTokens: 1500,
+        maxToolSteps: 30,
+        lane: 'interactive',
+      });
+
+      const context = execution.context;
+      const output = execution.output;
+      const errorMessage = output.status === 'error' ? (output.error || 'Unknown error') : null;
+
+      if (context) {
+        recordAgentTelemetry({
+          traceBase,
+          output,
+          context,
+          toolAuditSource: 'journal-command',
+          errorMessage: errorMessage ?? undefined,
+        });
+      }
+
+      if (errorMessage) {
+        await reply(`Journal command failed: ${errorMessage}`);
+      }
+    } catch (err) {
+      logger.error({ err }, 'Journal command failed');
+      await reply(`Journal command failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return true;
+  }
+
+  if (command.startsWith('task-')) {
+    // Task commands - let agent handle with tool access
+    const subCommand = command.replace('task-', '');
+    const prompt = subCommand === 'list'
+      ? '[TASK LIST]\nList all active (non-archived) tasks. Use getActiveDailyTasks tool. Show status, priority, and due dates.'
+      : subCommand === 'status'
+      ? `[TASK STATUS]\nShow status for task ID: ${args[0] || '(not provided)'}\nUse getDailyTaskById tool. If no ID provided, ask for it.`
+      : subCommand === 'complete'
+      ? `[TASK COMPLETE]\nMark task as complete: ${args[0] || '(not provided)'}\nUse updateDailyTask to set status to "completed".`
+      : subCommand === 'create'
+      ? `[TASK CREATE]\nCreate a new task: ${args.join(' ') || '(not provided)'}\nUse createDailyTask tool. Ask for any missing required info.`
+      : subCommand === 'archive'
+      ? `[TASK ARCHIVE]\nArchive task: ${args[0] || '(not provided)'}\nUse updateDailyTask to set status to "archived".`
+      : `[TASK ${subCommand.toUpperCase()}]\n${args.join(' ') || '(no args provided)'}\nUse appropriate daily task tools.`;
+
+    try {
+      const traceBase = createTraceBase({
+        chatId: params.chatId,
+        groupFolder: group.folder,
+        userId: params.senderId,
+        inputText: prompt,
+        source: 'task-command'
+      });
+      const routingDecision = routeRequest();
+
+      const execution = await executeAgentRun({
+        group,
+        prompt,
+        chatJid: params.chatId,
+        userId: params.senderId,
+        recallQuery: 'daily tasks',
+        recallMaxResults: 3,
+        recallMaxTokens: 300,
+        sessionId: sessions[group.folder],
+        onSessionUpdate: (sessionId) => { sessions[group.folder] = sessionId; },
+        availableGroups: buildAvailableGroupsSnapshot(),
+        modelMaxOutputTokens: 1500,
+        maxToolSteps: 30,
+        lane: 'interactive',
+      });
+
+      const context = execution.context;
+      const output = execution.output;
+      const errorMessage = output.status === 'error' ? (output.error || 'Unknown error') : null;
+
+      if (context) {
+        recordAgentTelemetry({
+          traceBase,
+          output,
+          context,
+          toolAuditSource: 'task-command',
+          errorMessage: errorMessage ?? undefined,
+        });
+      }
+
+      if (errorMessage) {
+        await reply(`Task command failed: ${errorMessage}`);
+      }
+    } catch (err) {
+      logger.error({ err }, 'Task command failed');
+      await reply(`Task command failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return true;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════════
+  // End Daily Planning Commands
+  // ═══════════════════════════════════════════════════════════════════════════════
 
   await reply('Unknown command. Use `/dotclaw help` for options.');
   return true;
