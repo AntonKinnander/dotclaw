@@ -8,7 +8,7 @@ import {
   deleteTask,
   getTaskById,
 } from './db.js';
-import { parseSubtasks, extractEmoji } from './task-breakdown.js';
+import { parseSubtasks } from './task-breakdown.js';
 import { resolveContainerGroupPathToHost } from './path-mapping.js';
 import {
   upsertMemoryItems,
@@ -1186,23 +1186,67 @@ async function processRequestIpc(
           return { id: requestId, ok: false, error: 'main_task is required' };
         }
 
+        // Build prompt for the agent
+        let prompt = `Break down this task into atomic subtasks (max 10):\n\n"${mainTask}"`;
+
+        const context = payload.context as { repo?: string; url?: string; calendar_link?: string; description?: string } | undefined;
+        if (context?.description) {
+          prompt += `\n\nContext: ${context.description}`;
+        }
+        if (context?.repo) {
+          prompt += `\n\nRepository: ${context.repo}`;
+        }
+        if (context?.url) {
+          prompt += `\n\nURL: ${context.url}`;
+        }
+
+        prompt += `\n\nReturn a JSON array of subtask strings. Each subtask should:
+- Start with an emoji (🔧 for fix, ✨ for feature, 📝 for doc, etc.)
+- Be max 55 characters
+- Be atomic and actionable
+
+Example format: ["🔍 Reproduce bug", "🐛 Find root cause", "💻 Write fix"]`;
+
         try {
-          const result = await breakdownTask({
-            group_folder: sourceGroup,
-            main_task: mainTask,
-            context: payload.context as { repo?: string; url?: string; calendar_link?: string; description?: string } | undefined,
-          }, {
-            registeredGroups: deps.registeredGroups,
-            getProvider: () => deps.getProvider(),
+          const registeredGroups = deps.registeredGroups();
+          const groupEntry = Object.entries(registeredGroups).find(([, g]) => g.folder === sourceGroup);
+          if (!groupEntry) {
+            return { id: requestId, ok: false, error: `Group not registered: ${sourceGroup}` };
+          }
+          const [chatJid, group] = groupEntry;
+
+          // Execute agent run with task-breakdown skill
+          const { output } = await executeAgentRun({
+            group,
+            prompt,
+            chatJid,
+            recallQuery: prompt,
+            recallMaxResults: 4,
+            recallMaxTokens: 1000,
+            maxToolSteps: 20,
+            timeoutMs: 120_000,
+            useSemaphore: true,
+            useGroupLock: false,
+            persistSession: false,
+            isScheduledTask: true,
+            lane: 'scheduled',
+            defaultSkill: 'task-breakdown',
           });
 
+          // Parse the output
+          const subtasks = parseSubtasks(output.result ?? '[]');
+
+          if (subtasks.length === 0) {
+            return { id: requestId, ok: false, error: 'No valid subtasks generated' };
+          }
+
           // Validate subtask count
-          if (result.subtasks.length > 10) {
+          if (subtasks.length > 10) {
             return { id: requestId, ok: false, error: 'Too many subtasks generated (max 10)' };
           }
 
           // Validate each subtask format
-          for (const subtask of result.subtasks) {
+          for (const subtask of subtasks) {
             if (subtask.title.length > 55) {
               return { id: requestId, ok: false, error: `Subtask title too long: ${subtask.title}` };
             }
@@ -1211,7 +1255,14 @@ async function processRequestIpc(
             }
           }
 
-          return { id: requestId, ok: true, result };
+          return {
+            id: requestId,
+            ok: true,
+            result: {
+              main_task: mainTask,
+              subtasks,
+            }
+          };
         } catch (err) {
           const errMsg = err instanceof Error ? err.message : String(err);
           return { id: requestId, ok: false, error: errMsg };
