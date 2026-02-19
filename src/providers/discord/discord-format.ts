@@ -4,6 +4,25 @@
  * Discord natively supports Markdown, so no conversion is needed.
  * This module handles chunking long messages while preserving code fences,
  * and adds [1/N] markers for multi-part messages.
+ *
+ * EMBED FORMAT:
+ * For rich embed cards, use a special XML-like format in AI responses:
+ *
+ * <embed title="Title" color="#0099FF">
+ * <field name="Field Name" inline="false">Field value content</field>
+ * <field name="Inline Field" inline="true">Short value</field>
+ * </embed>
+ *
+ * Multiple embeds can be sent in one message. Supported attributes:
+ * - title: Embed title (max 256 chars)
+ * - description: Main description (max 4096 chars)
+ * - color: Hex color (e.g., "#0099FF" or 0x0099FF)
+ * - thumbnail: URL for thumbnail image
+ * - footer: Footer text
+ *
+ * Field attributes:
+ * - name: Field name (max 256 chars)
+ * - inline: "true" or "false" for inline display
  */
 
 type Segment = {
@@ -174,4 +193,116 @@ export function formatDiscordMessage(text: string, maxLength: number): string[] 
   }
 
   return packed;
+}
+
+/**
+ * Parsed embed structure matching Discord.js API
+ */
+export interface ParsedEmbed {
+  title?: string;
+  description?: string;
+  color?: number;
+  thumbnail?: string;
+  footer?: string;
+  fields: Array<{ name: string; value: string; inline: boolean }>;
+}
+
+/**
+ * Parse embed declarations from AI response text.
+ *
+ * Extracts <embed>...</embed> blocks and returns them with any remaining text.
+ * Format: <embed title="Title" color="#0099FF">
+ *         <field name="Name" inline="false">Value</field>
+ *         </embed>
+ */
+export function parseEmbeds(text: string): { embeds: ParsedEmbed[]; remainingText: string } {
+  const embeds: ParsedEmbed[] = [];
+  let remainingText = text;
+
+  // Regex to match <embed>...</embed> blocks with attributes
+  const embedRegex = /<embed\b([^>]*)>([\s\S]*?)<\/embed>/gi;
+  let match: RegExpExecArray | null;
+  let lastIndex = 0;
+
+  while ((match = embedRegex.exec(text)) !== null) {
+    // Remove the embed block from remaining text
+    const before = text.slice(lastIndex, match.index);
+    const after = text.slice(match.index + match[0].length);
+    remainingText = (before + after).trim();
+
+    const attrsStr = match[1] || '';
+    const contentStr = match[2] || '';
+
+    const embed: ParsedEmbed = {
+      fields: [],
+    };
+
+    // Parse embed attributes
+    const attrRegex = /(\w+)=["']([^"']*)["']/g;
+    let attrMatch: RegExpExecArray | null;
+    while ((attrMatch = attrRegex.exec(attrsStr)) !== null) {
+      const [, key, value] = attrMatch;
+      switch (key.toLowerCase()) {
+        case 'title':
+          embed.title = value.slice(0, 256);
+          break;
+        case 'description':
+          embed.description = value.slice(0, 4096);
+          break;
+        case 'color':
+          // Parse hex color #RRGGBB or 0xRRGGBB
+          const hex = value.replace(/^0x/, '#').replace('#', '');
+          embed.color = parseInt(hex, 16);
+          break;
+        case 'thumbnail':
+          embed.thumbnail = value;
+          break;
+        case 'footer':
+          embed.footer = value.slice(0, 2048);
+          break;
+      }
+    }
+
+    // Parse field blocks
+    const fieldRegex = /<field\b([^>]*)>([\s\S]*?)<\/field>/gi;
+    let fieldMatch: RegExpExecArray | null;
+    while ((fieldMatch = fieldRegex.exec(contentStr)) !== null) {
+      const fieldAttrs = fieldMatch[1] || '';
+      const fieldValue = (fieldMatch[2] || '').trim().slice(0, 1024);
+
+      let fieldName = 'Field';
+      let inline = false;
+
+      const fieldAttrRegex = /(\w+)=["']([^"']*)["']/g;
+      let fieldAttrMatch: RegExpExecArray | null;
+      while ((fieldAttrMatch = fieldAttrRegex.exec(fieldAttrs)) !== null) {
+        const [, fKey, fValue] = fieldAttrMatch;
+        if (fKey.toLowerCase() === 'name') {
+          fieldName = fValue.slice(0, 256);
+        } else if (fKey.toLowerCase() === 'inline') {
+          inline = fValue.toLowerCase() === 'true';
+        }
+      }
+
+      // Skip empty fields
+      if (!fieldValue && !fieldName) continue;
+
+      embed.fields.push({ name: fieldName, value: fieldValue || '\u200B', inline });
+    }
+
+    // If no fields but has content, use as description
+    if (!embed.fields.length && contentStr.trim()) {
+      const trimmedContent = contentStr.trim().slice(0, 4096);
+      if (embed.description) {
+        embed.description = embed.description + '\n\n' + trimmedContent;
+      } else {
+        embed.description = trimmedContent;
+      }
+    }
+
+    embeds.push(embed);
+    lastIndex = embedRegex.lastIndex;
+  }
+
+  return { embeds, remainingText };
 }

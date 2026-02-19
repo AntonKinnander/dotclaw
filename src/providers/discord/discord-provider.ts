@@ -16,7 +16,7 @@ import type {
 } from '../types.js';
 import type { RegisteredGroup } from '../../types.js';
 import { ProviderRegistry } from '../registry.js';
-import { formatDiscordMessage } from './discord-format.js';
+import { formatDiscordMessage, parseEmbeds, type ParsedEmbed } from './discord-format.js';
 import { generateId } from '../../id.js';
 import { logger } from '../../logger.js';
 import { GROUPS_DIR } from '../../config.js';
@@ -202,6 +202,16 @@ export class DiscordProvider implements MessagingProvider {
 
   async sendMessage(chatId: string, text: string): Promise<SendResult> {
     const rawChannelId = ProviderRegistry.stripPrefix(chatId);
+
+    // Check for embeds in the text
+    const { embeds, remainingText } = parseEmbeds(text);
+
+    if (embeds.length > 0) {
+      // Send message with embeds
+      return this.sendMessageWithEmbeds(rawChannelId, remainingText, embeds);
+    }
+
+    // Regular message without embeds
     const chunks = formatDiscordMessage(text, MAX_MESSAGE_LENGTH);
     let firstMessageId: string | undefined;
 
@@ -217,6 +227,90 @@ export class DiscordProvider implements MessagingProvider {
     }
 
     logger.info({ chatId: rawChannelId, length: text.length }, 'Discord message sent');
+    return { success: true, messageId: firstMessageId };
+  }
+
+  /**
+   * Send a message with rich embeds
+   */
+  private async sendMessageWithEmbeds(
+    channelId: string,
+    content: string,
+    embeds: ParsedEmbed[]
+  ): Promise<SendResult> {
+    for (let attempt = 1; attempt <= this.config.sendRetries; attempt += 1) {
+      try {
+        const channel = await this.fetchChannel(channelId);
+        if (!channel) return { success: false };
+
+        // Convert parsed embeds to Discord.js embed format
+        const EmbedBuilder = this.discordJs?.EmbedBuilder;
+        if (!EmbedBuilder) {
+          // Fallback to regular message if discord.js doesn't support embeds
+          return this.sendMessageFallback(channelId, content);
+        }
+
+        const discordEmbeds = embeds.map(embed => {
+          const embedBuilder = new EmbedBuilder();
+
+          if (embed.title) embedBuilder.setTitle(embed.title);
+          if (embed.description) embedBuilder.setDescription(embed.description);
+          if (embed.color !== undefined) embedBuilder.setColor(embed.color);
+          if (embed.thumbnail) embedBuilder.setThumbnail(embed.thumbnail);
+          if (embed.footer) embedBuilder.setFooter({ text: embed.footer });
+          if (embed.fields.length > 0) embedBuilder.addFields(embed.fields);
+
+          return embedBuilder;
+        });
+
+        // Build payload
+        const payload: Record<string, unknown> = {
+          embeds: discordEmbeds,
+        };
+
+        // Add content if there's any remaining text
+        if (content && content.trim()) {
+          // Truncate to max message length if needed
+          payload.content = content.slice(0, MAX_MESSAGE_LENGTH);
+        }
+
+        const sent: DiscordMessage = await channel.send(payload);
+        logger.info({ channelId, embedCount: embeds.length }, 'Discord message with embeds sent');
+        return { success: true, messageId: String(sent.id) };
+      } catch (err) {
+        const retryAfterMs = getRetryAfterMs(err);
+        const retryable = isRetryableError(err);
+        if (!retryable || attempt === this.config.sendRetries) {
+          logger.error({ channelId, attempt, err }, 'Failed to send Discord message with embeds');
+          // Fallback to regular message
+          return this.sendMessageFallback(channelId, content);
+        }
+        const delayMs = retryAfterMs ?? (this.config.sendRetryDelayMs * attempt);
+        logger.warn({ channelId, attempt, delayMs }, 'Discord send with embeds failed; retrying');
+        await sleep(delayMs);
+      }
+    }
+    return { success: false };
+  }
+
+  /**
+   * Fallback to regular message when embed sending fails
+   */
+  private async sendMessageFallback(channelId: string, text: string): Promise<SendResult> {
+    const chunks = formatDiscordMessage(text, MAX_MESSAGE_LENGTH);
+    let firstMessageId: string | undefined;
+
+    for (let i = 0; i < chunks.length; i += 1) {
+      const result = await this.sendChunk(channelId, chunks[i], undefined);
+      if (!result.success) return { success: false };
+      if (!firstMessageId && result.messageId) {
+        firstMessageId = result.messageId;
+      }
+      if (i < chunks.length - 1) {
+        await sleep(SEND_DELAY_MS);
+      }
+    }
+
     return { success: true, messageId: firstMessageId };
   }
 

@@ -246,6 +246,54 @@ In Discord.js, threads **are channels**. When sending messages:
 - No special `threadId` option is needed in `sendMessage()`
 - The provider's `sendMessage(chatId, text)` works for both regular channels and threads
 
+### Discord Embed Cards for Rich Formatting
+AI responses can include Discord embed cards using a special XML-like format. This enables rich, sectioned content that displays beautifully in Discord.
+
+**Embed Format:**
+```xml
+<embed title="Card Title" color="#0099FF">
+<field name="Section Name" inline="false">Field content here</field>
+<field name="Inline Field" inline="true">Short value</field>
+</embed>
+```
+
+**Supported Attributes:**
+- `title` - Embed title (max 256 chars)
+- `description` - Main description (max 4096 chars)
+- `color` - Hex color (e.g., "#0099FF" or 0x0099FF)
+- `thumbnail` - URL for thumbnail image
+- `footer` - Footer text
+
+**Field Attributes:**
+- `name` - Field name/title (max 256 chars)
+- `inline` - "true" for side-by-side display, "false" for full width
+- Content - Field value (max 1024 chars)
+
+**Formatting in Embeds:**
+- ✅ Supported: **bold**, *italic*, ~~strikethrough~~, `code`, [links](url)
+- ❌ NOT supported: Tables with `|` pipes, horizontal rules `---`, headers `# ##`
+
+**Example for Daily Briefing:**
+```xml
+<embed title="☀️ Daily Briefing — February 19, 2026" color="#F4B400">
+<field name="📅 Yesterday's Outcomes" inline="false">✅ Grocery run
+✅ Personal Achievement Database — started
+🔴 AI Assistant task tracking — blocked</field>
+
+<field name="📋 Carry-Over Tasks" inline="false">🔴 Job application to Irma — Pending
+🟡 Personal Achievement Database — In progress</field>
+
+<field name="🎯 Focus for Today" inline="false">Complete Irma application
+Resolve Discord poll complexity issue</field>
+</embed>
+```
+
+### Discord Thread Messaging
+In Discord.js, threads **are channels**. When sending messages:
+- Use the thread ID directly as the `chatId` — it's already prefixed with `discord:`
+- No special `threadId` option is needed in `sendMessage()`
+- The provider's `sendMessage(chatId, text)` works for both regular channels and threads
+
 ### Streaming Delivery
 Real-time streaming uses IPC-based file watching: container writes chunks to `~/.dotclaw/data/ipc/<group>/stream/<trace_id>/`, host watches via `watchStreamChunks()` and delivers via provider's edit-in-place. Enabled by `runtime.host.streaming.enabled`.
 

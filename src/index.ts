@@ -788,18 +788,30 @@ async function handleAdminCommand(params: {
   if (command === 'briefing') {
     logger.info({ group: group.folder, userId: params.senderId }, '[/briefing] Daily briefing requested');
     // Generate daily briefing via agent
+    const today = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
     const prompt = [
       '[DAILY BRIEFING]',
-      'Generate a concise daily briefing for the user.',
+      `Generate a concise daily briefing for ${today}.`,
       '',
       'Use these tools to gather context:',
       '1. get_planning_context - for journal entries and recent activity',
       '2. get_daily_tasks - for active tasks',
       '',
-      'Then create a brief with these sections:',
-      '- Yesterday\'s outcomes (from journal)',
-      '- Carry-over tasks',
-      '- Focus areas for today',
+      'OUTPUT FORMAT - Use Discord embed cards for rich formatting:',
+      '',
+      '<embed title="☀️ Daily Briefing — ' + today + '" color="#F4B400">',
+      '<field name="📅 Yesterday\'s Outcomes" inline="false">List completed tasks and wins from yesterday\'s journal. Use emojis for status (✅ complete, 🔴 blocked, ⏳ in progress).</field>',
+      '<field name="📋 Carry-Over Tasks" inline="false">List incomplete tasks that need attention today. Format each on a new line with priority emoji.</field>',
+      '<field name="🎯 Focus Areas for Today" inline="false">Identify 2-3 key focus areas or goals for today based on context.</field>',
+      '</embed>',
+      '',
+      'EMBED FORMATTING RULES:',
+      '- Do NOT use markdown tables (| pipes) - they do not render in Discord embeds',
+      '- Use separate field blocks instead - each <field> creates a section',
+      '- Use plain lists with emojis instead of table headers',
+      '- Keep field names short and descriptive',
+      '- Field values support: bold **text**, italic *text*, `code`, and [links](url)',
+      '- Max 25 fields per embed, 1024 chars per field value',
       '',
       'Keep it concise and actionable. No subagents, no research.'
     ].join('\n');
@@ -898,7 +910,16 @@ async function handleAdminCommand(params: {
       '',
       'As you learn things, create a structured journal entry using the daily_journal database table.',
       'Be conversational and empathetic - this is a reflection, not an interrogation.',
-      'End by summarizing the journal entry you created.'
+      '',
+      'When summarizing at the end, you may use Discord embed cards for the summary:',
+      '<embed title="🌙 Nightly Recap Summary" color="#9B59B6">',
+      '<field name="📝 Overall Sentiment" inline="false">Summary of how the day felt overall</field>',
+      '<field name="🏆 Wins" inline="false">Key accomplishments and successes</field>',
+      '<field name="📚 Lessons" inline="false">Learning moments and insights</field>',
+      '<field name="🎯 Tomorrow\'s Focus" inline="false">Key focus areas for tomorrow</field>',
+      '</embed>',
+      '',
+      'EMBED FORMATTING: No markdown tables with | pipes. Use field blocks and plain lists with emojis instead.'
     ].join('\n');
 
     try {
