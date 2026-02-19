@@ -19,6 +19,7 @@ interface WorkflowConfig {
   groups: Record<string, {
     recap_time: string;
     forum_channel_id: string;
+    journal_forum_channel_id: string;
     auto_archive_hours: number;
     timezone: string;
   }>;
@@ -291,6 +292,7 @@ export async function handleConfigureWorkflow(args: string[], groupFolder: strin
     config.groups[groupFolder] = {
       recap_time: '22:00',
       forum_channel_id: '',
+      journal_forum_channel_id: '',
       auto_archive_hours: 24,
       timezone: TIMEZONE,
     };
@@ -304,7 +306,17 @@ export async function handleConfigureWorkflow(args: string[], groupFolder: strin
       }
       config.groups[groupFolder].forum_channel_id = channelId;
       saveWorkflowConfig(config);
-      return `✅ Set forum channel to: ${channelId}`;
+      return `✅ Set TO-DO forum channel to: ${channelId}`;
+    }
+
+    case 'journal-forum': {
+      const channelId = args[1];
+      if (!channelId) {
+        return 'Usage: /dotclaw configure-workflow journal-forum <channel_id>\nSets the Journal forum channel for daily journal entries.';
+      }
+      config.groups[groupFolder].journal_forum_channel_id = channelId;
+      saveWorkflowConfig(config);
+      return `✅ Set Journal forum channel to: ${channelId}`;
     }
 
     case 'recap-time': {
@@ -346,13 +358,15 @@ export async function handleConfigureWorkflow(args: string[], groupFolder: strin
       const groupConfig = config.groups[groupFolder];
       return `**Workflow Configuration for ${groupFolder}:**
 
-Forum Channel: ${groupConfig?.forum_channel_id || 'Not set'}
+TO-DO Forum Channel: ${groupConfig?.forum_channel_id || 'Not set'}
+Journal Forum Channel: ${groupConfig?.journal_forum_channel_id || 'Not set'}
 Recap Time: ${groupConfig?.recap_time || '22:00'}
 Timezone: ${groupConfig?.timezone || TIMEZONE}
 Auto-archive: ${groupConfig?.auto_archive_hours || 24} hours
 
 To update:
 /dotclaw configure-workflow forum <channel_id>
+/dotclaw configure-workflow journal-forum <channel_id>
 /dotclaw configure-workflow recap-time <HH:MM>
 /dotclaw configure-workflow timezone <timezone>
 /dotclaw configure-workflow auto-archive <hours>`;

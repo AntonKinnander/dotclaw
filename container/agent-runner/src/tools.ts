@@ -2490,6 +2490,90 @@ export function createTools(
     }) => ipc.createJournal(args))
   });
 
+  // --- Daily Planning Task Creation Tools ---
+
+  const breakdownTaskTool = tool({
+    name: 'mcp__dotclaw__breakdown_task',
+    description: 'Break down a task into atomic subtasks using AI. Returns an array of subtask strings with emoji prefixes. Useful for planning complex tasks.',
+    inputSchema: z.object({
+      main_task: z.string().describe('The main task to break down into subtasks'),
+      context: z.object({
+        description: z.string().optional(),
+        repo: z.string().optional(),
+        url: z.string().optional(),
+        calendar_link: z.string().optional()
+      }).optional().describe('Additional context for the task breakdown')
+    }),
+    outputSchema: z.object({
+      ok: z.boolean(),
+      result: z.any().optional(),
+      error: z.string().optional()
+    }),
+    execute: wrapExecute('mcp__dotclaw__breakdown_task', async (args: {
+      main_task: string;
+      context?: { description?: string; repo?: string; url?: string; calendar_link?: string };
+    }) => ipc.breakdownTask(args))
+  });
+
+  const createTaskThreadTool = tool({
+    name: 'mcp__dotclaw__create_task_thread',
+    description: 'Create a forum thread in the TO-DO forum for a task, optionally with a poll checklist of subtasks. This creates the Discord thread and database entry.',
+    inputSchema: z.object({
+      title: z.string().describe('Short title for the task (max 100 chars)'),
+      description: z.string().optional().describe('Detailed description of the task'),
+      subtasks: z.array(z.string()).optional().describe('Array of subtask strings with emoji prefixes (max 10)'),
+      forum_channel_id: z.string().describe('Discord channel ID of the TO-DO forum'),
+      due_date: z.string().optional().describe('Due date in YYYY-MM-DD format'),
+      priority: z.number().int().min(0).max(2).optional().describe('Priority: 0=low, 1=medium, 2=high (default 0)')
+    }),
+    outputSchema: z.object({
+      ok: z.boolean(),
+      result: z.any().optional(),
+      error: z.string().optional()
+    }),
+    execute: wrapExecute('mcp__dotclaw__create_task_thread', async (args: {
+      title: string;
+      description?: string;
+      subtasks?: string[];
+      forum_channel_id: string;
+      due_date?: string;
+      priority?: number;
+    }) => ipc.createTaskThread(args))
+  });
+
+  const createPlannedTaskTool = tool({
+    name: 'mcp__dotclaw__create_planned_task',
+    description: 'Create a planned task with automatic AI breakdown. This is the primary tool for daily planning - it creates the task, breaks it down into subtasks, and creates the forum thread with poll. Use get_workflow_config first to get the forum_channel_id.',
+    inputSchema: z.object({
+      title: z.string().describe('Title of the task to create'),
+      forum_channel_id: z.string().describe('Discord channel ID of the TO-DO forum (get from get_workflow_config)'),
+      context: z.record(z.string(), z.unknown()).optional().describe('Additional context for task breakdown')
+    }),
+    outputSchema: z.object({
+      ok: z.boolean(),
+      result: z.any().optional(),
+      error: z.string().optional()
+    }),
+    execute: wrapExecute('mcp__dotclaw__create_planned_task', async (args: {
+      title: string;
+      forum_channel_id: string;
+      context?: Record<string, unknown>;
+    }) => ipc.createPlannedTask(args))
+  });
+
+  const getWorkflowConfigTool = tool({
+    name: 'mcp__dotclaw__get_workflow_config',
+    description: 'Get the workflow configuration for the current group, including the TO-DO forum channel ID needed for creating tasks. Use this before create_planned_task or create_task_thread.',
+    inputSchema: z.object({}),
+    outputSchema: z.object({
+      ok: z.boolean(),
+      result: z.any().optional(),
+      error: z.string().optional()
+    }),
+    execute: wrapExecute('mcp__dotclaw__get_workflow_config', async () =>
+      ipc.getWorkflowConfig())
+  });
+
   // --- Config & Self-Configuration Tools ---
   const getConfigTool = tool({
     name: 'mcp__dotclaw__get_config',
@@ -2838,6 +2922,10 @@ export function createTools(
     getDailyTasksTool,
     getPlanningContextTool,
     createJournalTool,
+    breakdownTaskTool,
+    createTaskThreadTool,
+    createPlannedTaskTool,
+    getWorkflowConfigTool,
     registerGroupTool,
     removeGroupTool,
     listGroupsTool,

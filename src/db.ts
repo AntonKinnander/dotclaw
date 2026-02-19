@@ -237,6 +237,9 @@ export function initDatabase(): void {
 
     // Daily planning system migration: add tables for journals, tasks, and briefings
     migrateDailyPlanning();
+
+    // Journal Discord refs migration: add columns for Discord thread/message references
+    migrateJournalDiscordRefs();
   } catch (err) {
     dbInitialized = false;
     if (dbInstance) {
@@ -397,6 +400,42 @@ function migrateDailyPlanning(): void {
   `);
 
   db.prepare(`INSERT INTO _migrations (key, applied_at) VALUES (?, ?)`).run('daily_planning_v1', new Date().toISOString());
+}
+
+function migrateJournalDiscordRefs(): void {
+  // Create migration metadata table if needed
+  db.exec(`CREATE TABLE IF NOT EXISTS _migrations (key TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`);
+
+  const row = db.prepare(`SELECT key FROM _migrations WHERE key = 'journal_discord_refs_v1'`).get();
+  if (row) return; // Already migrated
+
+  // Add Discord reference columns to daily_journals table
+  const columns = [
+    'discord_channel_id TEXT',
+    'discord_thread_id TEXT',
+    'discord_message_id TEXT'
+  ];
+
+  // Get existing columns
+  const existingColumns = db.prepare(`PRAGMA table_info(daily_journals)`).all() as Array<{ name: string }>;
+  const existingColumnNames = new Set(existingColumns.map(c => c.name));
+
+  for (const column of columns) {
+    const columnName = column.split(' ')[0];
+    if (!existingColumnNames.has(columnName)) {
+      try {
+        db.exec(`ALTER TABLE daily_journals ADD COLUMN ${column}`);
+      } catch (err) {
+        // Column might already exist or other error - log and continue
+        const errMsg = err instanceof Error ? err.message : String(err);
+        if (!errMsg.includes('duplicate column')) {
+          console.warn(`Warning: Could not add column ${columnName}: ${errMsg}`);
+        }
+      }
+    }
+  }
+
+  db.prepare(`INSERT INTO _migrations (key, applied_at) VALUES (?, ?)`).run('journal_discord_refs_v1', new Date().toISOString());
 }
 
 /**
@@ -1022,6 +1061,9 @@ interface DailyJournalRow {
   diary_entry: string | null;
   created_at: string;
   updated_at: string;
+  discord_channel_id: string | null;
+  discord_thread_id: string | null;
+  discord_message_id: string | null;
 }
 
 interface DailyTaskRow {
@@ -1189,6 +1231,22 @@ export function updateDailyJournal(id: string, updates: Partial<{
   values.push(id);
 
   db.prepare(`UPDATE daily_journals SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+}
+
+/**
+ * Set Discord references for a journal entry
+ */
+export function setDailyJournalDiscordRefs(
+  id: string,
+  channelId: string,
+  threadId: string | null,
+  messageId: string | null = null
+): void {
+  db.prepare(`
+    UPDATE daily_journals
+    SET discord_channel_id = ?, discord_thread_id = ?, discord_message_id = ?, updated_at = ?
+    WHERE id = ?
+  `).run(channelId, threadId, messageId, new Date().toISOString(), id);
 }
 
 // ── Daily Task CRUD ───────────────────────────────────────────────────────

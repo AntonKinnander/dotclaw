@@ -1467,8 +1467,10 @@ Example format: ["🔍 Reproduce bug", "🐛 Find root cause", "💻 Write fix"]
         const diaryEntry = typeof payload.diary_entry === 'string' ? payload.diary_entry : undefined;
 
         try {
-          const { createDailyJournal } = await import('./db.js');
+          const { createDailyJournal, setDailyJournalDiscordRefs } = await import('./db.js');
+          const { loadWorkflowConfig } = await import('./daily-planning-commands.js');
 
+          // Create the journal entry in database
           const journalId = createDailyJournal({
             group_folder: sourceGroup,
             date,
@@ -1481,7 +1483,76 @@ Example format: ["🔍 Reproduce bug", "🐛 Find root cause", "💻 Write fix"]
             diary_entry: diaryEntry,
           });
 
-          return { id: requestId, ok: true, result: { journal_id: journalId } };
+          // Check if journal forum is configured and create thread
+          const workflowConfig = loadWorkflowConfig();
+          const groupConfig = workflowConfig.groups[sourceGroup];
+          const journalForumChannelId = groupConfig?.journal_forum_channel_id;
+
+          let threadId: string | null = null;
+          let messageId: string | null = null;
+
+          if (journalForumChannelId) {
+            const provider = deps.registry.getProviderForChat(`discord:${journalForumChannelId}`);
+            if (provider) {
+              // Format the journal entry for the forum post
+              const sentimentEmoji = sentiment === 'positive' ? '😊' : sentiment === 'negative' ? '😔' : '😐';
+              const title = `${sentimentEmoji} Journal — ${date}`;
+
+              let content = `**Daily Journal Entry — ${date}**\n\n`;
+
+              if (tasksCompleted.length > 0) {
+                content += '**✅ Completed:**\n';
+                tasksCompleted.forEach(t => content += `• ${t}\n`);
+                content += '\n';
+              }
+
+              if (tasksInProgress.length > 0) {
+                content += '**🔄 In Progress:**\n';
+                tasksInProgress.forEach(t => content += `• ${t}\n`);
+                content += '\n';
+              }
+
+              if (biggestSuccess) {
+                content += `**🏆 Biggest Success:**\n${biggestSuccess}\n\n`;
+              }
+
+              if (biggestError) {
+                content += `**🐛 Biggest Challenge:**\n${biggestError}\n\n`;
+              }
+
+              if (focusTomorrow) {
+                content += `**🎯 Focus for Tomorrow:**\n${focusTomorrow}\n\n`;
+              }
+
+              if (diaryEntry) {
+                content += `**📝 Notes:**\n${diaryEntry}`;
+              }
+
+              const threadResult = await (provider as any).createForumThread(
+                journalForumChannelId,
+                title,
+                content
+              );
+
+              if (threadResult.success && threadResult.threadId) {
+                threadId = threadResult.threadId;
+                messageId = threadResult.messageId ?? null;
+                // We're inside the if (journalForumChannelId) block, so it's guaranteed to be a string
+                setDailyJournalDiscordRefs(journalId, journalForumChannelId as string, threadId, messageId);
+              }
+            }
+          }
+
+          return {
+            id: requestId,
+            ok: true,
+            result: {
+              journal_id: journalId,
+              thread_id: threadId,
+              message_id: messageId,
+              forum_channel_id: journalForumChannelId || null,
+            }
+          };
         } catch (err) {
           const errMsg = err instanceof Error ? err.message : String(err);
           return { id: requestId, ok: false, error: errMsg };
@@ -1574,6 +1645,41 @@ Example format: ["🔍 Reproduce bug", "🐛 Find root cause", "💻 Write fix"]
               thread_id: result.thread_id,
               poll_id: result.poll_id,
               subtasks: result.subtasks,
+            }
+          };
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          return { id: requestId, ok: false, error: errMsg };
+        }
+      }
+
+      case 'get_workflow_config': {
+        try {
+          const { loadWorkflowConfig } = await import('./daily-planning-commands.js');
+          const config = loadWorkflowConfig();
+          const groupConfig = config.groups[sourceGroup];
+
+          if (!groupConfig) {
+            return {
+              id: requestId,
+              ok: true,
+              result: {
+                configured: false,
+                message: 'Workflow not configured for this group. Use /dotclaw configure-workflow to set up the TO-DO forum channel.'
+              }
+            };
+          }
+
+          return {
+            id: requestId,
+            ok: true,
+            result: {
+              configured: true,
+              forum_channel_id: groupConfig.forum_channel_id,
+              journal_forum_channel_id: groupConfig.journal_forum_channel_id,
+              recap_time: groupConfig.recap_time,
+              timezone: groupConfig.timezone,
+              auto_archive_hours: groupConfig.auto_archive_hours,
             }
           };
         } catch (err) {

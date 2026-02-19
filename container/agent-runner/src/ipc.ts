@@ -567,5 +567,35 @@ export function createIpcHandlers(ctx: IpcContext, config: IpcConfig) {
       return requestResponse('create_journal', args, config);
     },
 
+    async breakdownTask(args: {
+      main_task: string;
+      context?: { repo?: string; url?: string; calendar_link?: string; description?: string };
+    }) {
+      return requestResponse('breakdown_task', args, config, 120_000);
+    },
+
+    async createTaskThread(args: {
+      title: string;
+      description?: string;
+      subtasks?: string[];
+      forum_channel_id: string;
+      due_date?: string;
+      priority?: number;
+    }) {
+      return requestResponse('create_task_thread', args, config);
+    },
+
+    async createPlannedTask(args: {
+      title: string;
+      forum_channel_id: string;
+      context?: Record<string, unknown>;
+    }) {
+      return requestResponse('create_planned_task', args, config, 180_000);
+    },
+
+    async getWorkflowConfig() {
+      return requestResponse('get_workflow_config', {}, config);
+    },
+
   };
 }

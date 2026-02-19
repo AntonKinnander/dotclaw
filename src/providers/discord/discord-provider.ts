@@ -109,6 +109,10 @@ export class DiscordProvider implements MessagingProvider {
   private readonly callbackDataStore = new Map<string, { chatId: string; data: string; label: string; createdAt: number }>();
   private callbackCleanupInterval: NodeJS.Timeout | null = null;
 
+  // Pending slash command interactions that need editReply instead of sendMessage
+  private readonly pendingInteractions = new Map<string, { interaction: DiscordMessage; expiresAt: number }>();
+  private interactionCleanupInterval: NodeJS.Timeout | null = null;
+
   constructor(config: DiscordProviderConfig) {
     this.config = config;
   }
@@ -186,6 +190,16 @@ export class DiscordProvider implements MessagingProvider {
         }
       }
     }, 60_000);
+
+    // Cleanup expired pending interactions
+    this.interactionCleanupInterval = setInterval(() => {
+      const now = Date.now();
+      for (const [id, entry] of this.pendingInteractions) {
+        if (entry.expiresAt < now) {
+          this.pendingInteractions.delete(id);
+        }
+      }
+    }, 60_000);
   }
 
   async stop(): Promise<void> {
@@ -194,6 +208,11 @@ export class DiscordProvider implements MessagingProvider {
       clearInterval(this.callbackCleanupInterval);
       this.callbackCleanupInterval = null;
     }
+    if (this.interactionCleanupInterval) {
+      clearInterval(this.interactionCleanupInterval);
+      this.interactionCleanupInterval = null;
+    }
+    this.pendingInteractions.clear();
     if (this.client) {
       this.client.destroy();
       this.client = null;
@@ -202,6 +221,13 @@ export class DiscordProvider implements MessagingProvider {
 
   async sendMessage(chatId: string, text: string): Promise<SendResult> {
     const rawChannelId = ProviderRegistry.stripPrefix(chatId);
+
+    // Check if there's a pending slash command interaction for this channel
+    const pending = this.pendingInteractions.get(rawChannelId);
+    if (pending && pending.expiresAt > Date.now()) {
+      // Use interaction.editReply() for slash command responses
+      return this.sendInteractionReply(pending.interaction, text);
+    }
 
     // Check for embeds in the text
     const { embeds, remainingText } = parseEmbeds(text);
@@ -312,6 +338,74 @@ export class DiscordProvider implements MessagingProvider {
     }
 
     return { success: true, messageId: firstMessageId };
+  }
+
+  /**
+   * Send a reply via interaction.editReply() for slash commands
+   */
+  private async sendInteractionReply(interaction: DiscordMessage, text: string): Promise<SendResult> {
+    try {
+      const rawChannelId = String(interaction.channel?.id || '');
+
+      // Check for embeds
+      const { embeds, remainingText } = parseEmbeds(text);
+
+      if (embeds.length > 0) {
+        // Send with embeds via interaction
+        const EmbedBuilder = this.discordJs?.EmbedBuilder;
+        if (EmbedBuilder) {
+          const discordEmbeds = embeds.map(embed => {
+            const embedBuilder = new EmbedBuilder();
+            if (embed.title) embedBuilder.setTitle(embed.title);
+            if (embed.description) embedBuilder.setDescription(embed.description);
+            if (embed.color !== undefined) embedBuilder.setColor(embed.color);
+            if (embed.thumbnail) embedBuilder.setThumbnail(embed.thumbnail);
+            if (embed.footer) embedBuilder.setFooter({ text: embed.footer });
+            if (embed.fields.length > 0) embedBuilder.addFields(embed.fields);
+            return embedBuilder;
+          });
+
+          const payload: Record<string, unknown> = { embeds: discordEmbeds };
+          if (remainingText.trim()) {
+            payload.content = remainingText.slice(0, MAX_MESSAGE_LENGTH);
+          }
+
+          await interaction.editReply(payload);
+          logger.info({ channelId: rawChannelId, embedCount: embeds.length }, 'Discord interaction reply with embeds sent');
+        } else {
+          // Fallback to text only
+          await interaction.editReply({ content: remainingText.slice(0, MAX_MESSAGE_LENGTH) });
+          logger.info({ channelId: rawChannelId }, 'Discord interaction reply sent (text only)');
+        }
+      } else {
+        // Regular text reply
+        const chunks = formatDiscordMessage(text, MAX_MESSAGE_LENGTH);
+        // For interaction replies, we can only send one message, so take first chunk
+        await interaction.editReply({ content: chunks[0] || '...' });
+        logger.info({ channelId: rawChannelId }, 'Discord interaction reply sent');
+      }
+
+      // Remove pending interaction after use
+      this.pendingInteractions.delete(rawChannelId);
+
+      return { success: true, messageId: 'interaction-reply' };
+    } catch (err) {
+      logger.error({ err }, 'Failed to send Discord interaction reply');
+      // Remove pending interaction on error
+      const rawChannelId = String(interaction.channel?.id || '');
+      this.pendingInteractions.delete(rawChannelId);
+
+      // Try to send a follow-up message as fallback (if available)
+      if (typeof interaction.followUp === 'function') {
+        try {
+          await interaction.followUp({ content: text.slice(0, 2000), ephemeral: false });
+          return { success: true, messageId: 'follow-up' };
+        } catch (followErr) {
+          logger.error({ err: followErr }, 'Failed to send Discord follow-up message');
+        }
+      }
+      return { success: false };
+    }
   }
 
   private async sendChunk(
@@ -1050,6 +1144,14 @@ export class DiscordProvider implements MessagingProvider {
 
           const channelId = String(interaction.channel?.id || '');
           const chatId = ProviderRegistry.addPrefix('discord', channelId);
+
+          // Store the pending interaction so sendMessage can use editReply
+          // Interactions expire after 15 minutes (900000ms)
+          this.pendingInteractions.set(channelId, {
+            interaction,
+            expiresAt: Date.now() + 900000,
+          });
+          logger.debug({ channelId, commandName }, 'Stored pending Discord interaction');
 
           const senderId = String(interaction.user?.id || '');
           const senderName = interaction.member?.displayName
