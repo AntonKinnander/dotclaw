@@ -44,17 +44,66 @@ For each main task:
 ### 4. Create Task Threads
 
 For each finalized task:
-1. Create a forum thread with `create_task_thread`
-2. Include the subtask poll
-3. Link related tasks or context
+1. Use `create_planned_task` to automatically:
+   - Break down the task into subtasks
+   - Create a forum thread
+   - Create a poll with the subtasks
+   - Track everything in the database
+2. The orchestrator handles the entire workflow
+3. No need to call `breakdown_task` separately
 
 ## Available Tools
 
-- `breakdown_task` - Break down a task into subtasks
-- `create_task_thread` - Create forum thread with poll
+- `create_planned_task` - Create task with automatic breakdown, forum thread, and poll (recommended)
+- `breakdown_task` - Break down a task into subtasks (advanced: use with `create_task_thread`)
+- `create_task_thread` - Create forum thread with poll (advanced: use after `breakdown_task`)
 - `get_planning_context` - Get current tasks and yesterday's outcomes
 - `get_daily_tasks` - List all active tasks
 - `memory_upsert` - Save important context or decisions
+
+## Task Creation Workflow
+
+### Recommended: Use `create_planned_task`
+
+When user agrees on a task:
+
+1. Call `create_planned_task` with:
+   - `title`: Main task title
+   - `forum_channel_id`: TO-DO forum channel ID
+   - `context` (optional): repo, url, description, priority, due_date
+
+2. The orchestrator will:
+   - Break down into subtasks automatically
+   - Create forum thread
+   - Create poll with subtasks
+   - Return task/thread/poll IDs
+
+Example:
+```json
+{
+  "type": "create_planned_task",
+  "payload": {
+    "title": "Fix authentication bug",
+    "forum_channel_id": "1234567890",
+    "context": {
+      "repo": "myorg/myproject",
+      "url": "https://github.com/myorg/myproject/issues/42",
+      "description": "Users getting logged out after 5 minutes",
+      "priority": 1
+    }
+  }
+}
+```
+
+### Advanced: Manual Breakdown
+
+If you need more control or want to review subtasks before creating the thread:
+
+1. Call `breakdown_task` to get subtasks
+2. Review and adjust if needed
+3. Call `create_task_thread` with the subtasks
+
+Most users prefer the automatic workflow (`create_planned_task`).
 
 ## Conversation Flow
 

@@ -1527,6 +1527,61 @@ Example format: ["🔍 Reproduce bug", "🐛 Find root cause", "💻 Write fix"]
         }
       }
 
+      case 'create_planned_task': {
+        const title = typeof payload.title === 'string' ? payload.title.trim() : '';
+        const forumChannelId = typeof payload.forum_channel_id === 'string' ? payload.forum_channel_id : '';
+        const context = payload.context as Record<string, unknown> | undefined;
+
+        if (!title || !forumChannelId) {
+          return { id: requestId, ok: false, error: 'title and forum_channel_id are required' };
+        }
+
+        try {
+          // Get Discord provider
+          const provider = deps.registry.getProviderForChat(`discord:${forumChannelId}`);
+          if (!provider) {
+            return { id: requestId, ok: false, error: 'Discord provider not available' };
+          }
+
+          // Get or create orchestrator
+          const { getDailyPlanningOrchestrator } = await import('./daily-planning-orchestrator.js');
+          const orchestrator = getDailyPlanningOrchestrator(
+            provider as any,
+            {
+              registeredGroups: deps.registeredGroups,
+              sessions: deps.sessions,
+              setSession: deps.setSession,
+            }
+          );
+
+          // Create task with breakdown
+          const result = await orchestrator.createTaskWithBreakdown(
+            sourceGroup,
+            title,
+            forumChannelId,
+            context
+          );
+
+          if (!result) {
+            return { id: requestId, ok: false, error: 'Failed to create planned task' };
+          }
+
+          return {
+            id: requestId,
+            ok: true,
+            result: {
+              task_id: result.task_id,
+              thread_id: result.thread_id,
+              poll_id: result.poll_id,
+              subtasks: result.subtasks,
+            }
+          };
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          return { id: requestId, ok: false, error: errMsg };
+        }
+      }
+
       default:
         return { id: requestId, ok: false, error: `Unknown request type: ${data.type}` };
     }

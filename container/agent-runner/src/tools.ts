@@ -2433,6 +2433,63 @@ export function createTools(
       ipc.memoryStats(args))
   });
 
+  // --- Daily Planning Tools ---
+  const getDailyTasksTool = tool({
+    name: 'mcp__dotclaw__get_daily_tasks',
+    description: 'Get all active daily tasks for the current group. Returns tasks with their status, priority, and metadata.',
+    inputSchema: z.object({}),
+    outputSchema: z.object({
+      ok: z.boolean(),
+      result: z.any().optional(),
+      error: z.string().optional()
+    }),
+    execute: wrapExecute('mcp__dotclaw__get_daily_tasks', async () =>
+      ipc.getDailyTasks())
+  });
+
+  const getPlanningContextTool = tool({
+    name: 'mcp__dotclaw__get_planning_context',
+    description: 'Get planning context including in-progress tasks and latest journal entry. Useful for daily planning and nightly recaps.',
+    inputSchema: z.object({}),
+    outputSchema: z.object({
+      ok: z.boolean(),
+      result: z.any().optional(),
+      error: z.string().optional()
+    }),
+    execute: wrapExecute('mcp__dotclaw__get_planning_context', async () =>
+      ipc.getPlanningContext())
+  });
+
+  const createJournalTool = tool({
+    name: 'mcp__dotclaw__create_journal',
+    description: 'Create or update a daily journal entry with reflection data. Use this to record daily accomplishments, mood, and plan for tomorrow.',
+    inputSchema: z.object({
+      date: z.string().optional().describe('Date in YYYY-MM-DD format (defaults to today)'),
+      tasks_completed: z.array(z.string()).optional().describe('List of completed task IDs or titles'),
+      tasks_in_progress: z.array(z.string()).optional().describe('List of in-progress task IDs or titles'),
+      sentiment: z.enum(['positive', 'neutral', 'negative']).optional().describe('Overall sentiment for the day'),
+      biggest_success: z.string().optional().describe('Key win or achievement'),
+      biggest_error: z.string().optional().describe('Learning moment or mistake'),
+      focus_tomorrow: z.string().optional().describe('One thing to prioritize tomorrow'),
+      diary_entry: z.string().optional().describe('Free-form diary text'),
+    }),
+    outputSchema: z.object({
+      ok: z.boolean(),
+      result: z.any().optional(),
+      error: z.string().optional()
+    }),
+    execute: wrapExecute('mcp__dotclaw__create_journal', async (args: {
+      date?: string;
+      tasks_completed?: string[];
+      tasks_in_progress?: string[];
+      sentiment?: 'positive' | 'neutral' | 'negative';
+      biggest_success?: string;
+      biggest_error?: string;
+      focus_tomorrow?: string;
+      diary_entry?: string;
+    }) => ipc.createJournal(args))
+  });
+
   // --- Config & Self-Configuration Tools ---
   const getConfigTool = tool({
     name: 'mcp__dotclaw__get_config',
@@ -2778,6 +2835,9 @@ export function createTools(
     memoryListTool,
     memorySearchTool,
     memoryStatsTool,
+    getDailyTasksTool,
+    getPlanningContextTool,
+    createJournalTool,
     registerGroupTool,
     removeGroupTool,
     listGroupsTool,

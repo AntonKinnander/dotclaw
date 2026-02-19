@@ -546,5 +546,26 @@ export function createIpcHandlers(ctx: IpcContext, config: IpcConfig) {
       }, config);
     },
 
+    async getDailyTasks() {
+      return requestResponse('get_daily_tasks', {}, config);
+    },
+
+    async getPlanningContext() {
+      return requestResponse('get_planning_context', {}, config);
+    },
+
+    async createJournal(args: {
+      date?: string;
+      tasks_completed?: string[];
+      tasks_in_progress?: string[];
+      sentiment?: 'positive' | 'neutral' | 'negative';
+      biggest_success?: string;
+      biggest_error?: string;
+      focus_tomorrow?: string;
+      diary_entry?: string;
+    }) {
+      return requestResponse('create_journal', args, config);
+    },
+
   };
 }
