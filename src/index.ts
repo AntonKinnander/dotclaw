@@ -335,12 +335,11 @@ async function handleAdminCommand(params: {
   senderName: string;
   content: string;
   botUsername?: string;
-  threadId?: string;
-}, sendReply: (chatId: string, text: string, opts?: { threadId?: string }) => Promise<void>): Promise<boolean> {
+}, sendReply: (chatId: string, text: string) => Promise<void>): Promise<boolean> {
   const parsed = parseAdminCommand(params.content, params.botUsername);
   if (!parsed) return false;
 
-  const reply = (text: string) => sendReply(params.chatId, text, { threadId: params.threadId });
+  const reply = (text: string) => sendReply(params.chatId, text);
 
   const group = registeredGroups[params.chatId];
   if (!group) {
@@ -791,22 +790,18 @@ async function handleAdminCommand(params: {
     // Generate daily briefing via agent
     const prompt = [
       '[DAILY BRIEFING]',
-      'Generate a personalized daily briefing for the user. Gather context from:',
-      '- Latest journal entries (mood, successes, errors, focus areas) - use get_planning_context tool',
-      '- Active and pending tasks - use get_daily_tasks tool',
-      '- Memory (facts, preferences, patterns)',
-      '- Relevant files/docs in the workspace',
+      'Generate a concise daily briefing for the user.',
       '',
-      'Create an actionable morning brief that:',
-      '1. Summarizes yesterday\'s key outcomes (from journal if available)',
-      '2. Lists carry-over tasks and priorities',
-      '3. Identifies focus areas based on goals and patterns',
-      '4. Provides actionable recommendations for today',
+      'Use these tools to gather context:',
+      '1. get_planning_context - for journal entries and recent activity',
+      '2. get_daily_tasks - for active tasks',
       '',
-      'Use tools to gather data. Spawn subagents for deeper research if needed.',
-      'Format as a clean, readable brief with sections.',
+      'Then create a brief with these sections:',
+      '- Yesterday\'s outcomes (from journal)',
+      '- Carry-over tasks',
+      '- Focus areas for today',
       '',
-      'Do NOT mention that you are saving or persisting the briefing - just deliver it naturally.'
+      'Keep it concise and actionable. No subagents, no research.'
     ].join('\n');
 
     try {
@@ -834,7 +829,8 @@ async function handleAdminCommand(params: {
         onSessionUpdate: (sessionId) => { sessions[group.folder] = sessionId; },
         availableGroups: buildAvailableGroupsSnapshot(),
         modelMaxOutputTokens: routingDecision.maxOutputTokens,
-        maxToolSteps: routingDecision.maxToolSteps,
+        maxToolSteps: 20, // Limit tool steps to prevent getting stuck
+        timeoutMs: 180_000, // 3 minute timeout
         lane: 'interactive',
       });
 
@@ -1397,8 +1393,8 @@ function createProviderHandlers(
       void (async () => {
         try {
           if (incoming.content) {
-            const sendReply = async (cId: string, text: string, opts?: { threadId?: string }) => {
-              await registry.getProviderForChat(cId).sendMessage(cId, text, { threadId: opts?.threadId });
+            const sendReply = async (cId: string, text: string) => {
+              await registry.getProviderForChat(cId).sendMessage(cId, text);
             };
             const adminHandled = await handleAdminCommand({
               chatId,
@@ -1406,7 +1402,6 @@ function createProviderHandlers(
               senderName: incoming.senderName,
               content: incoming.content,
               botUsername,
-              threadId: incoming.threadId,
             }, sendReply);
             if (adminHandled) return;
           }

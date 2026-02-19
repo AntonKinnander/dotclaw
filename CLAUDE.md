@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-DotClaw is a personal OpenRouter-based assistant for Telegram and Discord. A single Node.js host process connects to messaging providers, routes messages through a pipeline, and executes agent requests inside isolated Docker containers. Each group gets its own filesystem, memory, and session state.
+DotClaw is a personal OpenRouter-based assistant for **Discord only**. A single Node.js host process connects to Discord, routes messages through a pipeline, and executes agent requests inside isolated Docker containers. Each group gets its own filesystem, memory, and session state.
+
+**IMPORTANT**: This project is Discord-only. Telegram support has been deprecated and is not maintained. When making changes, assume Discord only.
 
 ## Development Commands
 
@@ -71,7 +73,7 @@ Run commands directly — don't tell the user to run them.
 ```
 Host process (Node.js)              Docker container (agent-runner)
 ─────────────────────               ──────────────────────────────
-Providers (Telegram/Discord)        OpenRouter SDK calls
+Discord provider                    OpenRouter SDK calls
 Message pipeline (SQLite queue)     Tool execution (bash, browser, MCP)
 Request router                      Session management
 Container runner                    Memory extraction
@@ -123,7 +125,9 @@ Resolved in `model-registry.ts`, lowest-to-highest priority:
 
 ### Provider System
 
-Chat IDs are prefixed: `telegram:123456`, `discord:789012`. The provider registry (`src/providers/registry.ts`) routes by prefix. Both providers implement a common interface with send/edit/delete operations and media support.
+Chat IDs are prefixed: `discord:789012`. The provider registry (`src/providers/registry.ts`) routes by prefix. The Discord provider implements a common interface with send/edit/delete operations and media support.
+
+**IMPORTANT**: Discord-only. Telegram support is deprecated.
 
 ### Container Mounts
 
@@ -211,8 +215,7 @@ Set these via `npm run configure` (interactive) or edit `~/.dotclaw/.env` direct
 
 | Variable | Purpose | Required |
 |----------|---------|----------|
-| `TELEGRAM_BOT_TOKEN` | Telegram bot token | One of TELEGRAM or DISCORD required |
-| `DISCORD_BOT_TOKEN` | Discord bot token | One of TELEGRAM or DISCORD required |
+| `DISCORD_BOT_TOKEN` | Discord bot token | Required |
 | `DISCORD_GUILD_ID` | Discord server ID for instant command sync (dev/testing) | Optional - see below |
 | `OPENROUTER_API_KEY` | OpenRouter API key for AI models | Required |
 | `BRAVE_SEARCH_API_KEY` | Brave Search API key for web search | Optional |
@@ -236,6 +239,12 @@ Key actions dispatched via `ipc-dispatcher.ts`: `set_model` (supports `action: '
 - **Node**: Requires Node.js >=20.
 
 ## Important Patterns
+
+### Discord Thread Messaging
+In Discord.js, threads **are channels**. When sending messages:
+- Use the thread ID directly as the `chatId` — it's already prefixed with `discord:`
+- No special `threadId` option is needed in `sendMessage()`
+- The provider's `sendMessage(chatId, text)` works for both regular channels and threads
 
 ### Streaming Delivery
 Real-time streaming uses IPC-based file watching: container writes chunks to `~/.dotclaw/data/ipc/<group>/stream/<trace_id>/`, host watches via `watchStreamChunks()` and delivers via provider's edit-in-place. Enabled by `runtime.host.streaming.enabled`.
