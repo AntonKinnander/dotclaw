@@ -787,6 +787,7 @@ async function handleAdminCommand(params: {
   // ═══════════════════════════════════════════════════════════════════════════════
 
   if (command === 'briefing') {
+    logger.info({ group: group.folder, userId: params.senderId }, '[/briefing] Daily briefing requested');
     // Generate daily briefing via agent
     const prompt = [
       '[DAILY BRIEFING]',
@@ -802,9 +803,10 @@ async function handleAdminCommand(params: {
       '3. Identifies focus areas based on goals and patterns',
       '4. Provides actionable recommendations for today',
       '',
-      'IMPORTANT: After generating the briefing, you MUST use the create_briefing tool to persist it to the database.',
       'Use tools to gather data. Spawn subagents for deeper research if needed.',
-      'Format as a clean, readable brief with sections.'
+      'Format as a clean, readable brief with sections.',
+      '',
+      'Do NOT mention that you are saving or persisting the briefing - just deliver it naturally.'
     ].join('\n');
 
     try {
@@ -817,11 +819,14 @@ async function handleAdminCommand(params: {
       });
       const routingDecision = routeRequest();
 
+      logger.info({ group: group.folder, model: routingDecision.model }, '[/briefing] Starting agent run');
+
       const execution = await executeAgentRun({
         group,
         prompt,
         chatJid: params.chatId,
         userId: params.senderId,
+        userName: params.senderName,
         recallQuery: 'daily briefing journal tasks goals',
         recallMaxResults: routingDecision.recallMaxResults,
         recallMaxTokens: routingDecision.recallMaxTokens,
@@ -848,17 +853,40 @@ async function handleAdminCommand(params: {
       }
 
       if (errorMessage) {
+        logger.error({ group: group.folder, error: errorMessage }, '[/briefing] Agent run failed');
         await reply(`Briefing generation failed: ${errorMessage}`);
+        return true;
       }
-      // Agent response is delivered via provider
+
+      logger.info({ group: group.folder, resultLength: output.result?.length || 0 }, '[/briefing] Agent run completed');
+
+      // Send the briefing to the user
+      if (output.result) {
+        await reply(output.result);
+
+        // Persist the briefing to database
+        try {
+          const { createDailyBriefing } = await import('./db.js');
+          createDailyBriefing({
+            group_folder: group.folder,
+            date: new Date().toISOString().split('T')[0],
+            briefing_text: output.result,
+          });
+          logger.info({ group: group.folder }, '[/briefing] Briefing persisted to database');
+        } catch (dbErr) {
+          logger.error({ err: dbErr, group: group.folder }, '[/briefing] Failed to persist briefing to database');
+          // Don't fail the user request - just log it
+        }
+      }
     } catch (err) {
-      logger.error({ err }, 'Briefing agent run failed');
+      logger.error({ err, group: group.folder }, '[/briefing] Briefing agent run failed');
       await reply(`Briefing generation failed: ${err instanceof Error ? err.message : String(err)}`);
     }
     return true;
   }
 
   if (command === 'recap') {
+    logger.info({ group: group.folder, userId: params.senderId }, '[/recap] Nightly recap requested');
     // Start nightly recap conversation
     const prompt = [
       '[NIGHTLY RECAP]',
@@ -892,6 +920,7 @@ async function handleAdminCommand(params: {
         prompt,
         chatJid: params.chatId,
         userId: params.senderId,
+        userName: params.senderName,
         recallQuery: 'nightly recap journal daily reflection',
         recallMaxResults: Math.max(4, routingDecision.recallMaxResults - 2),
         recallMaxTokens: routingDecision.recallMaxTokens,
@@ -918,10 +947,13 @@ async function handleAdminCommand(params: {
       }
 
       if (errorMessage) {
+        logger.error({ group: group.folder, error: errorMessage }, '[/recap] Agent run failed');
         await reply(`Recap failed: ${errorMessage}`);
+      } else {
+        logger.info({ group: group.folder }, '[/recap] Agent run completed');
       }
     } catch (err) {
-      logger.error({ err }, 'Recap agent run failed');
+      logger.error({ err, group: group.folder }, '[/recap] Agent run failed');
       await reply(`Recap failed: ${err instanceof Error ? err.message : String(err)}`);
     }
     return true;
@@ -966,6 +998,7 @@ async function handleAdminCommand(params: {
         prompt,
         chatJid: params.chatId,
         userId: params.senderId,
+        userName: params.senderName,
         recallQuery: 'task breakdown planning subtasks',
         recallMaxResults: 4,
         recallMaxTokens: 400,
@@ -993,6 +1026,8 @@ async function handleAdminCommand(params: {
 
       if (errorMessage) {
         await reply(`Breakdown failed: ${errorMessage}`);
+      } else if (output.result) {
+        await reply(output.result);
       }
     } catch (err) {
       logger.error({ err }, 'Breakdown agent run failed');
@@ -1025,6 +1060,7 @@ async function handleAdminCommand(params: {
         prompt,
         chatJid: params.chatId,
         userId: params.senderId,
+        userName: params.senderName,
         recallQuery: 'journal daily entry',
         recallMaxResults: 3,
         recallMaxTokens: 300,
@@ -1052,6 +1088,8 @@ async function handleAdminCommand(params: {
 
       if (errorMessage) {
         await reply(`Journal command failed: ${errorMessage}`);
+      } else if (output.result) {
+        await reply(output.result);
       }
     } catch (err) {
       logger.error({ err }, 'Journal command failed');
@@ -1089,6 +1127,7 @@ async function handleAdminCommand(params: {
         prompt,
         chatJid: params.chatId,
         userId: params.senderId,
+        userName: params.senderName,
         recallQuery: 'daily tasks',
         recallMaxResults: 3,
         recallMaxTokens: 300,
@@ -1116,6 +1155,8 @@ async function handleAdminCommand(params: {
 
       if (errorMessage) {
         await reply(`Task command failed: ${errorMessage}`);
+      } else if (output.result) {
+        await reply(output.result);
       }
     } catch (err) {
       logger.error({ err }, 'Task command failed');
@@ -1159,6 +1200,7 @@ async function handleAdminCommand(params: {
         prompt,
         chatJid: params.chatId,
         userId: params.senderId,
+        userName: params.senderName,
         recallQuery: 'daily planning tasks goals yesterday',
         recallMaxResults: Math.max(5, routingDecision.recallMaxResults),
         recallMaxTokens: routingDecision.recallMaxTokens,
@@ -1186,6 +1228,8 @@ async function handleAdminCommand(params: {
 
       if (errorMessage) {
         await reply(`Daily planning failed: ${errorMessage}`);
+      } else if (output.result) {
+        await reply(output.result);
       }
     } catch (err) {
       logger.error({ err }, 'Daily planning agent run failed');

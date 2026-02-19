@@ -130,6 +130,7 @@ async function main() {
 
   let telegramToken = envMap.get('TELEGRAM_BOT_TOKEN') || '';
   let discordToken = envMap.get('DISCORD_BOT_TOKEN') || '';
+  let discordGuildId = envMap.get('DISCORD_GUILD_ID') || '';
   let openrouterKey = envMap.get('OPENROUTER_API_KEY') || '';
   let openrouterModel = modelConfig.model;
   let openrouterSiteUrl = runtimeOpenrouter.siteUrl || '';
@@ -142,6 +143,7 @@ async function main() {
   if (nonInteractive) {
     telegramToken = process.env.TELEGRAM_BOT_TOKEN || telegramToken;
     discordToken = process.env.DISCORD_BOT_TOKEN || discordToken;
+    discordGuildId = process.env.DISCORD_GUILD_ID || discordGuildId;
     openrouterKey = process.env.OPENROUTER_API_KEY || openrouterKey;
     braveKey = process.env.BRAVE_SEARCH_API_KEY || braveKey;
 
@@ -185,6 +187,9 @@ async function main() {
     }
     if (discordEnabled) {
       discordToken = await promptForValue(rl, 'DISCORD_BOT_TOKEN', discordToken);
+      console.log('\n  Tip: Enable Developer Mode in Discord (User Settings > Advanced)');
+      console.log('  Then right-click your server icon and select "Copy Server ID"');
+      discordGuildId = await promptForValue(rl, 'DISCORD_GUILD_ID (for instant command sync)', discordGuildId, true);
     }
     openrouterKey = await promptForValue(rl, 'OPENROUTER_API_KEY', openrouterKey);
     openrouterModel = await promptForValue(rl, 'OPENROUTER_MODEL', openrouterModel);
@@ -204,6 +209,7 @@ async function main() {
   const updates = {};
   if (telegramEnabled && telegramToken) updates.TELEGRAM_BOT_TOKEN = telegramToken;
   if (discordEnabled && discordToken) updates.DISCORD_BOT_TOKEN = discordToken;
+  if (discordEnabled && discordGuildId) updates.DISCORD_GUILD_ID = discordGuildId;
   updates.OPENROUTER_API_KEY = openrouterKey;
   if (braveKey) updates.BRAVE_SEARCH_API_KEY = braveKey;
 

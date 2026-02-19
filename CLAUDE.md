@@ -194,7 +194,7 @@ All runtime data lives in `~/.dotclaw/` (override with `DOTCLAW_HOME`).
 
 | File | Purpose |
 |------|---------|
-| `.env` | Secrets (API keys, bot tokens) |
+| `.env` | Secrets (API keys, bot tokens) - Set via `npm run configure` |
 | `config/runtime.json` | Host runtime overrides (timeouts, concurrency, routing) |
 | `config/model.json` | Active model, allowlist, per-user/per-group overrides + routing rules |
 | `config/behavior.json` | Autotune optimization outputs |
@@ -204,6 +204,22 @@ All runtime data lives in `~/.dotclaw/` (override with `DOTCLAW_HOME`).
 | `data/model-capabilities.json` | Cached model capabilities (24hr TTL) |
 | `data/failover-cooldowns.json` | Persisted model cooldown state |
 | `registered-groups.json` | Group registrations |
+
+### Environment Variables (.env)
+
+Set these via `npm run configure` (interactive) or edit `~/.dotclaw/.env` directly:
+
+| Variable | Purpose | Required |
+|----------|---------|----------|
+| `TELEGRAM_BOT_TOKEN` | Telegram bot token | One of TELEGRAM or DISCORD required |
+| `DISCORD_BOT_TOKEN` | Discord bot token | One of TELEGRAM or DISCORD required |
+| `DISCORD_GUILD_ID` | Discord server ID for instant command sync (dev/testing) | Optional - see below |
+| `OPENROUTER_API_KEY` | OpenRouter API key for AI models | Required |
+| `BRAVE_SEARCH_API_KEY` | Brave Search API key for web search | Optional |
+| `DISCORD_OWNER_ID` | Discord user ID for owner-only commands | Optional |
+| `DISCORD_EXCLUDED_CHANNELS` | Comma-separated channel IDs to ignore | Optional |
+
+**About DISCORD_GUILD_ID**: When set, slash commands sync instantly (guild commands). Without it, commands sync globally which can take up to 1 hour to propagate. Get it by enabling Developer Mode in Discord (User Settings > Advanced), then right-click your server icon → Copy Server ID. For production bots, leave unset to use global commands.
 
 The container reads `runtime.json` via readonly mount at `/workspace/config/runtime.json`. Container-side config is in `agent-config.ts` which reads the `agent.*` fields.
 

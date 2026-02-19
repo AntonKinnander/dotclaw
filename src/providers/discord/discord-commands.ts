@@ -85,6 +85,14 @@ export const DOTCLAW_COMMANDS: SlashCommandDefinition[] = [
     name: 'groups',
     description: 'List registered groups (main only)',
   },
+  {
+    name: 'ping',
+    description: 'Check if the bot is responsive',
+  },
+  {
+    name: 'sync-commands',
+    description: 'Sync Discord slash commands',
+  },
 
   // Daily Planning commands
   {
