@@ -567,5 +567,17 @@ export function createIpcHandlers(ctx: IpcContext, config: IpcConfig) {
       return requestResponse('create_journal', args, config);
     },
 
+    async createBriefing(args: {
+      date?: string;
+      briefing_text: string;
+      sources?: {
+        journal_id?: string;
+        tasks?: string[];
+        events?: Array<{ title: string; time: string }>;
+      } | null;
+    }) {
+      return requestResponse('create_briefing', args, config);
+    },
+
   };
 }

@@ -791,8 +791,8 @@ async function handleAdminCommand(params: {
     const prompt = [
       '[DAILY BRIEFING]',
       'Generate a personalized daily briefing for the user. Gather context from:',
-      '- Latest journal entries (mood, successes, errors, focus areas)',
-      '- Active and pending tasks',
+      '- Latest journal entries (mood, successes, errors, focus areas) - use get_planning_context tool',
+      '- Active and pending tasks - use get_daily_tasks tool',
       '- Memory (facts, preferences, patterns)',
       '- Relevant files/docs in the workspace',
       '',
@@ -802,6 +802,7 @@ async function handleAdminCommand(params: {
       '3. Identifies focus areas based on goals and patterns',
       '4. Provides actionable recommendations for today',
       '',
+      'IMPORTANT: After generating the briefing, you MUST use the create_briefing tool to persist it to the database.',
       'Use tools to gather data. Spawn subagents for deeper research if needed.',
       'Format as a clean, readable brief with sections.'
     ].join('\n');

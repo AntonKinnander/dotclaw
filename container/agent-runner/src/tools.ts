@@ -2490,6 +2490,37 @@ export function createTools(
     }) => ipc.createJournal(args))
   });
 
+  const createBriefingTool = tool({
+    name: 'mcp__dotclaw__create_briefing',
+    description: 'Create or update a daily briefing. Use this to persist a generated daily briefing to the database for reference.',
+    inputSchema: z.object({
+      date: z.string().optional().describe('Date in YYYY-MM-DD format (defaults to today)'),
+      briefing_text: z.string().describe('The full briefing text content'),
+      sources: z.object({
+        journal_id: z.string().optional().describe('Source journal entry ID if used'),
+        tasks: z.array(z.string()).optional().describe('Task IDs or titles referenced'),
+        events: z.array(z.object({
+          title: z.string(),
+          time: z.string()
+        })).optional().describe('Calendar events referenced')
+      }).nullable().optional().describe('Sources used to generate the briefing')
+    }),
+    outputSchema: z.object({
+      ok: z.boolean(),
+      result: z.any().optional(),
+      error: z.string().optional()
+    }),
+    execute: wrapExecute('mcp__dotclaw__create_briefing', async (args: {
+      date?: string;
+      briefing_text: string;
+      sources?: {
+        journal_id?: string;
+        tasks?: string[];
+        events?: Array<{ title: string; time: string }>;
+      } | null;
+    }) => ipc.createBriefing(args))
+  });
+
   // --- Config & Self-Configuration Tools ---
   const getConfigTool = tool({
     name: 'mcp__dotclaw__get_config',
@@ -2838,6 +2869,7 @@ export function createTools(
     getDailyTasksTool,
     getPlanningContextTool,
     createJournalTool,
+    createBriefingTool,
     registerGroupTool,
     removeGroupTool,
     listGroupsTool,

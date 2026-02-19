@@ -1488,6 +1488,34 @@ Example format: ["🔍 Reproduce bug", "🐛 Find root cause", "💻 Write fix"]
         }
       }
 
+      case 'create_briefing': {
+        const date = typeof payload.date === 'string' ? payload.date : new Date().toISOString().split('T')[0];
+        const briefingText = typeof payload.briefing_text === 'string' ? payload.briefing_text : '';
+        const sources = payload.sources && typeof payload.sources === 'object'
+          ? payload.sources as { journal_id?: string; tasks?: string[]; events?: Array<{ title: string; time: string }> }
+          : null;
+
+        if (!briefingText) {
+          return { id: requestId, ok: false, error: 'briefing_text is required' };
+        }
+
+        try {
+          const { createDailyBriefing } = await import('./db.js');
+
+          const briefingId = createDailyBriefing({
+            group_folder: sourceGroup,
+            date,
+            briefing_text: briefingText,
+            sources,
+          });
+
+          return { id: requestId, ok: true, result: { briefing_id: briefingId } };
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          return { id: requestId, ok: false, error: errMsg };
+        }
+      }
+
       case 'get_planning_context': {
         try {
           const { getActiveDailyTasks, getLatestDailyJournal } = await import('./db.js');
